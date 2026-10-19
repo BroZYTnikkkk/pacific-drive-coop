@@ -82,6 +82,55 @@ local function managers()
 end
 
 -- ---------------------------------------------------------------- status
+local BODY_MATERIAL = "/Engine/EngineMaterials/DefaultMaterial.DefaultMaterial"
+local revealed = {}        -- character full name -> true
+local function revealOtherBodies()
+    local mat = nil
+    for _, ch in ipairs(FindAllOf(CHARACTER_CLASS) or {}) do
+        if valid(ch) and not revealed[ch:GetFullName()] then
+            local mine = false
+            pcall(function() mine = valid(ch.Controller) and ch.Controller:IsLocalController() end)
+            -- on a client, the host's character has no controller there; it is "other" too
+            if not mine then
+                mat = mat or LoadAsset(BODY_MATERIAL)
+                local ok, err = pcall(function()
+                    local mesh = ch.Mesh
+                    mesh:SetMaterial(0, mat)
+                    mesh:SetMaterial(1, mat)
+                    mesh:SetCastShadow(true)
+                end)
+                revealed[ch:GetFullName()] = true
+                log("BODY %s visible with %s ok=%s %s", objName(ch), BODY_MATERIAL, tostring(ok), ok and "" or tostring(err))
+            end
+        end
+    end
+end
+
+-- in-game screenshot (HighResShot writes PNGs to <instance>/PenDriverPro/Saved/Screenshots/WindowsNoEditor)
+local function screenshot(tagText)
+    log("SHOT %s", tagText)
+    console("HighResShot 1")
+end
+
+-- host: turn the camera to the other player and take a screenshot (visual check of bodies and seats)
+local hostShots = {}
+local function hostLookAndShoot(key, tagText)
+    if hostShots[key] then return end
+    local lpc = localController()
+    if not valid(lpc) then return end
+    for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+        if valid(pc) and not pc:IsLocalController() and valid(pc.Pawn) and className(pc.Pawn) == CHARACTER_CLASS then
+            hostShots[key] = true
+            local camLoc = lpc.PlayerCameraManager:GetCameraLocation()
+            local target = pc.Pawn:K2_GetActorLocation()
+            local rot = UEHelpers.GetKismetMathLibrary():FindLookAtRotation(camLoc, target)
+            lpc:SetControlRotation(rot)
+            ExecuteInGameThreadWithDelay(400, function() screenshot(tagText) end)
+            return
+        end
+    end
+end
+
 local function status()
     tick = tick + 1
     local ksl = UEHelpers.GetKismetSystemLibrary()
@@ -207,6 +256,8 @@ end
 -- Client -> host command channel: the stock reliable Server RPC ServerChangeName carries a tagged string;
 -- the host reads it back from the remote PlayerState name. No new RPCs are needed.
 local CMD_PREFIX = "PDCOOP:"
+-- TempSocket_Seat (driver) sits at Y = -45.8 in BP_PlayerCarNew; the mirrored front passenger seat is Y = +45.8
+local PASSENGER_SIDE_OFFSET = 91.6
 local seated = {}          -- remote character full name -> car full name
 local drive = { phase = "wait", t = 0, mode = "throttle", startLoc = nil, lastLoc = nil, frames = 0 }
 local EAttachmentRule = { KeepRelative = 0, KeepWorld = 1, SnapToTarget = 2 }
@@ -256,7 +307,7 @@ local function seatPassenger(pc, car, force)
     local seat = car:K2_GetActorLocation()
     pcall(function() seat = car.TempSocket_Seat:K2_GetComponentLocation() end)
     local right = car:GetActorRightVector()
-    local target = { X = seat.X + right.X * 70, Y = seat.Y + right.Y * 70, Z = seat.Z + 10 }
+    local target = { X = seat.X + right.X * PASSENGER_SIDE_OFFSET, Y = seat.Y + right.Y * PASSENGER_SIDE_OFFSET, Z = seat.Z + 10 }
     pcall(function() ch.CharacterMovement:DisableMovement() end)
     ch:SetActorEnableCollision(false)
     ch:K2_SetActorLocation(target, false, {}, true)
@@ -324,8 +375,8 @@ local function registerSeatHook()
                 local t = transformParam:get()
                 local r = car:GetActorRightVector()
                 local before = string.format("%.0f,%.0f,%.0f", t.Translation.X, t.Translation.Y, t.Translation.Z)
-                t.Translation.X = t.Translation.X + r.X * 70
-                t.Translation.Y = t.Translation.Y + r.Y * 70
+                t.Translation.X = t.Translation.X + r.X * PASSENGER_SIDE_OFFSET
+                t.Translation.Y = t.Translation.Y + r.Y * PASSENGER_SIDE_OFFSET
                 transformParam:set(t)
                 -- the game asks every frame while seated: log the first call and then every 600th
                 seatHookCalls = seatHookCalls + 1
@@ -571,6 +622,7 @@ local function clientCarTick()
     if valid(parent) then rideTicks = rideTicks + 1 end
     if SCENARIO == "rejoincar" and droppedOnce and not unseatSent and rideTicks >= 6 then
         unseatSent = true
+        screenshot("client riding as passenger after rejoin")
         log("UNSEATTEST riding again for %d s after the rejoin, asking to get out", rideTicks * 5)
         sendCommand("UNSEAT")
     end
@@ -958,6 +1010,11 @@ LoopInGameThreadWithDelay(5000, function()
             if not gmLogged then gmLogged = true; step("gamemode", logGameModeOnce) end
             step("spawn", spawnForRemotePlayers)
             step("commands", hostCommandsTick)
+            if BOTS and SCENARIO == "rejoincar" then
+                if tick >= 22 and drive.phase == "wait" then step("shot1", function() hostLookAndShoot("walk", "host looks at player 2 walking") end) end
+                if drive.phase == "throttle" and drive.t == 25 then step("shot2", function() hostLookAndShoot("ride", "host looks at the passenger") end) end
+            end
+            step("bodies", revealOtherBodies)
             step("seathook", registerSeatHook)
             step("seatkeeper", startSeatKeeper)
             if CAR_LIKE then
@@ -975,6 +1032,7 @@ LoopInGameThreadWithDelay(5000, function()
         if ROLE == "host" and not gmLogged and gameplay then step("netcfg", function() applyNetTimeouts("listen") end) end
         if ROLE == "client" and gameplay then
             step("dedupe", dedupeCar)
+            step("bodies", revealOtherBodies)
             step("seathook", registerSeatHook)
             local bound = false
             step("bind", function() bound = bindClientCharacter() end)

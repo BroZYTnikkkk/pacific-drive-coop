@@ -203,6 +203,14 @@ foreach ($k in $checks.Keys) {
 }
 Write-Output "SUMMARY: $pass/$total checks passed"
 
+# in-game screenshots taken during the run (HighResShot)
+foreach ($c in "client1", "client2") {
+    $shotDir = Join-Path $root "$c\PenDriverPro\Saved\Screenshots"
+    Get-ChildItem $shotDir -Recurse -Filter *.png -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $runStart } | ForEach-Object {
+        Copy-Item $_.FullName (Join-Path $out "shot-$c-$($_.Name)") -Force
+        Write-Output "SCREENSHOT $c $($_.Name)"
+    }
+}
 foreach ($c in "client1", "client2") {
     Write-Output "===== $c events"
     Select-String -Path "$out\$c-UE4SS.log" -Pattern "PDCoopNet\] (GAMEMODE|SPAWN|DEDUPE|client |host |CLIENT-LOCAL|SEAT|CMD|DRIVE|.* error:)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }

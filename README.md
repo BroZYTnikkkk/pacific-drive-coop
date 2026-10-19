@@ -17,7 +17,9 @@ listen-server netcode and driven by a [UE4SS](https://github.com/UE4SS-RE/RE-UE4
 | Host drives, the second player rides along as a passenger | `car` | 16/16 |
 | Passenger drops out and rejoins while the host is driving: spawns next to the car and is seated again; then gets out (UNSEAT) and walks | `rejoincar` | 24/24 |
 | Host `servertravel` to another map: the client follows and keeps its character | `travel` | 14/14 |
-| The game's own map change (e.g. new game, quit to menu): host re-hosts the new map, the client reconnects and spawns next to the host | `gametravel` | 12 pass, 2 n/a |
+| The game's own map change (e.g. new game, quit to menu): host re-hosts the new map, the client reconnects and spawns next to the host | `gametravel` | 15/15 (2 n/a) |
+| Start of a new game (player starts seated in the intro car): one car on the client, player 2 seated as passenger, not on top of the host | `gametravel` | 15/15 |
+| Test runs report game crashes (crash reporters are closed, dumps kept) | all | yes |
 
 A joining or re-joining player always appears next to what the host controls right now (the host's character,
 or the car, in which case they are seated as a passenger). Saved positions and the garage are never used.

@@ -30,7 +30,7 @@ local CAR_LIKE = (SCENARIO == "car" or SCENARIO == "rejoincar")
 local BOTS = (SCENARIO ~= "play")       -- test bots: auto-open/connect, walking, nudges, the bot driver
 local droppedOnce = false   -- rejoincar: the client disconnects itself once while riding
 local CHARACTER_CLASS = "PDP_MainCharacter_C"
-local CAR_CLASS = "BP_PlayerCarNew_C"
+local CAR_CLASS = "BaseNewCar"    -- base class of every player car (BP_PlayerCarNew_C, BP_PlayerCar_Intro_C, ...)
 local ROLE_AUTHORITY, ROLE_SIMULATED = 3, 1
 local tick = 0
 local spawnedFor = {}      -- PlayerController full name -> true
@@ -39,6 +39,14 @@ local reportedDupes = false
 local walking = false
 
 -- Destroyed actors stay findable until garbage collection; treat PendingKill objects as gone.
+local baseCarClass = nil
+local function isCar(o)
+    if o == nil or not o:IsValid() then return false end
+    baseCarClass = baseCarClass or StaticFindObject("/Script/PenDriverPro.BaseNewCar")
+    local ok, r = pcall(function() return o:IsA(baseCarClass) end)
+    return ok and r
+end
+
 local function valid(o)
     if o == nil or not o:IsValid() then return false end
     local ok, dead = pcall(function() return o:HasAnyInternalFlags(EInternalObjectFlags.PendingKill) end)
@@ -137,7 +145,15 @@ local function spawnForRemotePlayers()
     local hostChar = hostCharacter()
     if not valid(hostChar) then return end
     local lpc = localController()
-    local anchor = (valid(lpc) and valid(lpc.Pawn)) and lpc.Pawn or hostChar
+    -- the car the host is in: either possessed (driving) or the host character sits attached to it
+    -- (the new game intro starts with the player already seated)
+    local hostCar = nil
+    if valid(lpc) and isCar(lpc.Pawn) then hostCar = lpc.Pawn end
+    if not hostCar then
+        local okP, par = pcall(function() return hostChar:GetAttachParentActor() end)
+        if okP and isCar(par) then hostCar = par end
+    end
+    local anchor = hostCar or ((valid(lpc) and valid(lpc.Pawn)) and lpc.Pawn or hostChar)
     for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
         local key = valid(pc) and pc:GetFullName() or nil
         if key and not pc:IsLocalController() and not spawnedFor[key]
@@ -148,7 +164,7 @@ local function spawnForRemotePlayers()
             local l = anchor:K2_GetActorLocation()
             local r = { X = 0, Y = 1, Z = 0 }
             pcall(function() r = anchor:GetActorRightVector() end)
-            local side = (className(anchor) == CAR_CLASS) and 320 or 250
+            local side = hostCar and 320 or 250
             local xf = { Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
                          Translation = { X = l.X + r.X * side, Y = l.Y + r.Y * side, Z = l.Z + 60 },
                          Scale3D = { X = 1, Y = 1, Z = 1 } }
@@ -165,9 +181,16 @@ local function spawnForRemotePlayers()
                 end
                 log("SPAWNED %s for %s at %s next to %s (%s), possessed=%s", objName(actor), objName(pc), fmtLoc(actor),
                     objName(anchor), fmtLoc(anchor), tostring(valid(pc.Pawn) and pc.Pawn:GetFullName() == actor:GetFullName()))
-                if className(anchor) == CAR_CLASS and seatNewPlayerInCar then
-                    log("SPAWN host is driving: seating %s as passenger", objName(actor))
-                    pcall(seatNewPlayerInCar, pc, anchor)
+                if hostCar and seatNewPlayerInCar then
+                    -- possession can make the game seat the character itself (intro: into the driver's seat,
+                    -- on top of the host), so seat it as passenger once now and once a moment later
+                    log("SPAWN host is in %s: seating %s as passenger", objName(hostCar), objName(actor))
+                    pcall(seatNewPlayerInCar, pc, hostCar)
+                    local carName = hostCar:GetFullName()
+                    ExecuteInGameThreadWithDelay(1500, function()
+                        local c = StaticFindObject(carName)
+                        if valid(pc) and isCar(c) then pcall(seatNewPlayerInCar, pc, c, true) end
+                    end)
                 end
             end
             -- The single-player managers keep one character reference: keep it on the host character.
@@ -225,10 +248,11 @@ local function remoteCommands()
     return out
 end
 
-local function seatPassenger(pc, car)
+local function seatPassenger(pc, car, force)
     local ch = pc.Pawn
     if not valid(ch) or className(ch) ~= CHARACTER_CLASS then return end
-    if seated[ch:GetFullName()] then return end
+    if seated[ch:GetFullName()] and not force then return end
+    pcall(function() ch:K2_DetachFromActor(EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld) end)
     local seat = car:K2_GetActorLocation()
     pcall(function() seat = car.TempSocket_Seat:K2_GetComponentLocation() end)
     local right = car:GetActorRightVector()
@@ -268,6 +292,76 @@ local function hostCommandsTick()
         if valid(car) and rc.cmd == "SEAT" then seatPassenger(rc.pc, car)
         elseif valid(car) and rc.cmd == "UNSEAT" then unseatPassenger(rc.pc, car) end
     end
+end
+
+-- The game seats "the player" with PDP_MainCharacter_C.GetCarAttachTransformForCharacter (the driver's seat),
+-- e.g. at the start of a new game it put player 2 into the driver's seat on top of the host (exp26).
+-- 1) post-hook that function and move the result to the passenger side for player 2;
+-- 2) a keeper on the host that re-seats player 2 if it still ends up inside the host.
+local function isPlayerTwo(ch)
+    local okC, localCtl = pcall(function() return valid(ch.Controller) and ch.Controller:IsLocalController() end)
+    if not okC then return false end
+    if ROLE == "host" then return valid(ch.Controller) and not localCtl end
+    return localCtl == true
+end
+
+local seatHookDone = false
+local seatHookCalls = 0
+local function registerSeatHook()
+    if seatHookDone then return end
+    local any = FindFirstOf(CHARACTER_CLASS)
+    if not valid(any) then return end
+    seatHookDone = true
+    local cls = any:GetClass():GetFullName():match("%s(%S+)$")
+    local path = cls .. ":GetCarAttachTransformForCharacter"
+    local ok, err = pcall(function()
+        RegisterHook(path, function(ctx, transformParam)
+            local ch = ctx:get()
+            if not valid(ch) or not isPlayerTwo(ch) then return end
+            local car = playerCar()
+            if not valid(car) then return end
+            local okT, errT = pcall(function()
+                local t = transformParam:get()
+                local r = car:GetActorRightVector()
+                local before = string.format("%.0f,%.0f,%.0f", t.Translation.X, t.Translation.Y, t.Translation.Z)
+                t.Translation.X = t.Translation.X + r.X * 70
+                t.Translation.Y = t.Translation.Y + r.Y * 70
+                transformParam:set(t)
+                -- the game asks every frame while seated: log the first call and then every 600th
+                seatHookCalls = seatHookCalls + 1
+                if seatHookCalls % 600 == 1 then
+                    local after = transformParam:get()
+                    log("SEATHOOK %s driver seat %s -> passenger %.0f,%.0f,%.0f (call %d)", objName(ch), before,
+                        after.Translation.X, after.Translation.Y, after.Translation.Z, seatHookCalls)
+                end
+            end)
+            if not okT then log("SEATHOOK %s could not change the transform: %s", objName(ch), tostring(errT)) end
+        end)
+    end)
+    log("SEATHOOK register %s ok=%s %s", path, tostring(ok), ok and "" or tostring(err))
+end
+
+local keeperStarted = false
+local function startSeatKeeper()
+    if keeperStarted or ROLE ~= "host" then return end
+    keeperStarted = true
+    LoopInGameThreadWithDelay(1000, function()
+        local hostChar = hostCharacter()
+        if not valid(hostChar) then return end
+        local okP, par = pcall(function() return hostChar:GetAttachParentActor() end)
+        local lpc = localController()
+        local car = (okP and isCar(par)) and par or ((valid(lpc) and isCar(lpc.Pawn)) and lpc.Pawn or nil)
+        if not car then return end
+        for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+            if valid(pc) and not pc:IsLocalController() and valid(pc.Pawn) and className(pc.Pawn) == CHARACTER_CLASS then
+                local d = dist(pc.Pawn:K2_GetActorLocation(), hostChar:K2_GetActorLocation())
+                if d < 40 then
+                    log("KEEPER %s is inside the host (%.0f uu), re-seating as passenger", objName(pc.Pawn), d)
+                    pcall(seatPassenger, pc, car, true)
+                end
+            end
+        end
+    end)
 end
 
 local function carStateString(car)
@@ -497,14 +591,20 @@ end
 
 -- ---------------------------------------------------------------- client side
 local function dedupeCar()
-    local replicated, locals = nil, {}
+    local replicatedBy, locals = {}, {}
     for _, c in ipairs(FindAllOf(CAR_CLASS) or {}) do
         if valid(c) then
-            if c.Role == ROLE_SIMULATED then replicated = c
+            if c.Role == ROLE_SIMULATED then replicatedBy[className(c)] = c
             elseif c.Role == ROLE_AUTHORITY then table.insert(locals, c) end
         end
     end
+    local replicated = nil
+    for _, c in pairs(replicatedBy) do replicated = c end
     if not valid(replicated) then return end
+    -- only local copies of a class the host also replicates are duplicates
+    local dupes = {}
+    for _, c in ipairs(locals) do if replicatedBy[className(c)] then table.insert(dupes, c) end end
+    locals = dupes
     for _, c in ipairs(locals) do
         local key = c:GetFullName()
         local state = dedupeState[key]
@@ -858,6 +958,8 @@ LoopInGameThreadWithDelay(5000, function()
             if not gmLogged then gmLogged = true; step("gamemode", logGameModeOnce) end
             step("spawn", spawnForRemotePlayers)
             step("commands", hostCommandsTick)
+            step("seathook", registerSeatHook)
+            step("seatkeeper", startSeatKeeper)
             if CAR_LIKE then
                 step("car", hostCarTick)
                 step("driveloop", ensureDriveLoop)
@@ -873,6 +975,7 @@ LoopInGameThreadWithDelay(5000, function()
         if ROLE == "host" and not gmLogged and gameplay then step("netcfg", function() applyNetTimeouts("listen") end) end
         if ROLE == "client" and gameplay then
             step("dedupe", dedupeCar)
+            step("seathook", registerSeatHook)
             local bound = false
             step("bind", function() bound = bindClientCharacter() end)
             if tick >= 30 then step("report", reportLocalReplicatedActorsOnce) end

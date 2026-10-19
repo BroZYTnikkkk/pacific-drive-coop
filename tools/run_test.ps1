@@ -27,6 +27,7 @@ foreach ($c in "client1", "client2") {
     Set-Content -Encoding ascii "$mod\role.txt" $roles[$c]
     Remove-Item (Join-Path $root "$c\$bin\ue4ss\UE4SS.log") -ErrorAction SilentlyContinue
 }
+$runStart = Get-Date
 foreach ($c in "client1", "client2") {
     $exe = Join-Path $root "$c\$bin\PenDriverPro-Win64-Shipping.exe"
     Start-Process $exe -ArgumentList "-NotInstalled", "-windowed", "-ResX=960", "-ResY=540", "-log" -WorkingDirectory (Split-Path $exe) | Out-Null
@@ -42,6 +43,20 @@ Start-Sleep 3
 
 $out = Join-Path $root "results\$Name"
 New-Item -ItemType Directory -Force $out | Out-Null
+# A crashed game leaves CrashReportClient open (exp13's host crash went unnoticed that way). Close the
+# reporters of these test copies by PID without sending anything, and keep the crash folders with the results.
+$crashes = @()
+Get-Process CrashReportClient -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$root\client*" } |
+    ForEach-Object { Stop-Process -Id $_.Id -Confirm:$false }
+foreach ($c in "client1", "client2") {
+    Get-ChildItem (Join-Path $root "$c\PenDriverPro\Saved\Crashes") -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $runStart } | ForEach-Object {
+            $msg = (Select-String -Path (Join-Path $_.FullName "CrashContext.runtime-xml") -Pattern "<ErrorMessage>([^<]*)" -ErrorAction SilentlyContinue |
+                Select-Object -First 1 | ForEach-Object { $_.Matches[0].Groups[1].Value })
+            $crashes += "$c at $($_.LastWriteTime.ToString('HH:mm:ss')): $msg"
+            Move-Item $_.FullName (Join-Path $out "crash-$c-$($_.Name)") -Force
+        }
+}
 foreach ($c in "client1", "client2") {
     Copy-Item (Join-Path $root "$c\$bin\ue4ss\UE4SS.log") "$out\$c-UE4SS.log" -ErrorAction SilentlyContinue
     Copy-Item (Join-Path $root "$c\PenDriverPro\Saved\Logs\PenDriverPro.log") "$out\$c-PenDriverPro.log" -ErrorAction SilentlyContinue
@@ -90,7 +105,7 @@ $checks["passenger stays with the car on the client (max char-to-car $gap uu < 4
 if ($Scenario -eq "rejoincar") {
     $checks["client dropped out on purpose while riding"] = [bool](Select-String -Path $clientLog -Pattern "DROPTEST riding" -Quiet)
     $checks["client rejoined the host in RB_Garage"] = [bool](Select-String -Path $clientLog -Pattern "REJOIN back in RB_Garage" -Quiet)
-    $checks["host seated the re-joined player straight into the driven car"] = [bool](Select-String -Path $hostLog -Pattern "SPAWN host is driving: seating" -Quiet)
+    $checks["host seated the re-joined player straight into the driven car"] = [bool](Select-String -Path $hostLog -Pattern "SPAWN host is in \S+: seating" -Quiet)
     $lines = @(Get-Content $clientLog)
     $idx = -1; for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match "REJOIN back in") { $idx = $i; break } }
     $post = @(); if ($idx -ge 0) { $post = @($lines[$idx..($lines.Count - 1)] | Where-Object { $_ -match "RIDE parent=BP_PlayerCarNew_C\S* charLoc=\S+ carLoc=(\S+) charToCar=(\d+)" }) }
@@ -132,6 +147,25 @@ if ($Scenario -eq "gametravel") {
         }
     }
     $checks["re-joined player spawned next to the host (first distance $near uu < 800)"] = ($near -ne $null) -and ($near -lt 800)
+    # owner's report: two cars inside each other at the start of a new game (intro car BP_PlayerCar_Intro_C)
+    $lastNew = if ($after.Count) { $after[-1] } else { "" }
+    $nCars = ([regex]::Matches($lastNew, "BP_PlayerCar\w*_C:\d+")).Count
+    $checks["client has exactly one car in the new map ($nCars)"] = $nCars -eq 1
+    # and the joining player must not be stacked on the host (the intro seated both in the driver's seat)
+    $stack = $null
+    if ($newMap) {
+        $hl2 = @(Select-String -Path $hostLog -Pattern "PDNET\|host\|.*map=$newMap\|" | ForEach-Object { $_.Line })
+        if ($hl2.Count) {
+            $l = $hl2[-1]
+            $a = [regex]::Match($l, "PDP_MainCharacter_C:\d+\[local\|role=3\|(-?\d+),(-?\d+),(-?\d+)")
+            $b = [regex]::Match($l, "PDP_MainCharacter_C:\d+\[remote\|role=3\|(-?\d+),(-?\d+),(-?\d+)")
+            if ($a.Success -and $b.Success) {
+                $dx = [double]$a.Groups[1].Value - [double]$b.Groups[1].Value; $dy = [double]$a.Groups[2].Value - [double]$b.Groups[2].Value; $dz = [double]$a.Groups[3].Value - [double]$b.Groups[3].Value
+                $stack = [math]::Round([math]::Sqrt($dx * $dx + $dy * $dy + $dz * $dz))
+            }
+        }
+    }
+    $checks["joining player is not inside the host (distance $stack uu > 40)"] = ($stack -ne $null) -and ($stack -gt 40)
     Write-Output "===== GAMETRAVEL host events"; $hostEv | Select-Object -First 30
     Write-Output "===== GAMETRAVEL client events"
     Select-String -Path $clientLog -Pattern "\] (REJOIN|MAPCHANGE|console:)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) } | Select-Object -First 20
@@ -152,6 +186,9 @@ if ($Scenario -eq "travel") {
     Write-Output "===== TRAVEL: client net events"
     Select-String -Path "$out\client2-PenDriverPro.log" -Pattern "LogNet: (Browse|Welcomed|Join)|NetworkFailure|TravelFailure|ClientTravel|ServerTravel|LoadMap" | Select-Object -Last 15 | ForEach-Object { $_.Line.Substring(0, [Math]::Min(240, $_.Line.Length)) }
 }
+
+$checks["no game crash during the run ($($crashes.Count))"] = $crashes.Count -eq 0
+if ($crashes.Count) { Write-Output "===== CRASHES"; $crashes }
 
 # gametravel leaves the garage after ~20 s on purpose, too short for the walking bursts: not applicable there
 $skip = @()

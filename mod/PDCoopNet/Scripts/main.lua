@@ -1,4 +1,4 @@
--- PDCoopNet v4: Pacific Drive co-op experiments.
+-- PDCoopNet v6: Pacific Drive co-op experiments (carsync.lua: shared trunk, car state, player 2 inventory save).
 -- Role comes from ue4ss/Mods/PDCoopNet/role.txt (line 1: host|client|off, line 2: map or address,
 -- line 3: scenario play|car|rejoincar|travel|gametravel|lootprobe|itemprobe|channel|loot, default play).
 -- play: no test bots. Keys: F8 host = host the current map (servertravel ?listen), F8 client = connect to the
@@ -673,6 +673,15 @@ local function archLoad(short)
     return archCache[path] or nil
 end
 
+-- shared trunk, car part state, player 2's inventory saved on the host (carsync.lua)
+local CarSync = require("carsync")({
+    log = log, valid = valid, UEHelpers = UEHelpers, objName = objName, CHAN_MAX = CHAN_MAX,
+    hostSend = function(payload) hostSend(payload) end,
+    sendCommand = function(cmd) sendCommand(cmd) end,
+    hostMsgHandlers = hostMsgHandlers, archShort = archShort, archLoad = archLoad,
+    playerCar = function() return playerCar() end,
+})
+
 -- the world items of this machine: list of { actor, id, arch, x, y, z, p, yw, r }
 local function scanWorldItems()
     local out = {}
@@ -947,7 +956,8 @@ local function hostCommandsTick()
         log("CMD received #%d %s from %s", rc.seq, rc.cmd:sub(1, 120), objName(rc.pc))
         if valid(car) and kind == "SEAT" then seatPassenger(rc.pc, car)
         elseif valid(car) and kind == "UNSEAT" then unseatPassenger(rc.pc, car)
-        elseif kind == "PICKUP" or kind == "DROP" then hostItemCommand(kind, args, rc.pc) end
+        elseif kind == "PICKUP" or kind == "DROP" then hostItemCommand(kind, args, rc.pc)
+        elseif not CarSync.hostCommand(kind, args, rc.pc) then log("CMD unknown %s", tostring(kind)) end
     end
 end
 
@@ -1709,6 +1719,9 @@ LoopInGameThreadWithDelay(200, function()
         if fastTick % 5 == 0 then
             ok, err = pcall(hostItemsTick)
             if not ok then log("items error: %s", tostring(err)) end
+            -- after hostItemsTick: a new set of clients clears the queue there, the full state is queued here
+            ok, err = pcall(CarSync.hostTick)
+            if not ok then log("carsync error: %s", tostring(err)) end
         end
         ok, err = pcall(hostChannelTick)
         if not ok then log("chan error: %s", tostring(err)) end
@@ -1718,6 +1731,8 @@ LoopInGameThreadWithDelay(200, function()
         if fastTick % 5 == 0 then
             ok, err = pcall(clientItemsTick)
             if not ok then log("items error: %s", tostring(err)) end
+            ok, err = pcall(CarSync.clientTick, lastHostPs, fastTick)
+            if not ok then log("carsync error: %s", tostring(err)) end
         end
         ok, err = pcall(clientCommandTick)
         if not ok then log("cmd error: %s", tostring(err)) end

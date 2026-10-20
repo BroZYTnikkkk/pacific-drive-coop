@@ -3,3 +3,9 @@ results/
 role.txt
 bin/
 obj/
+player_id.txt
+save_*.txt
+dev.txt
+cmd.txt
+cmd.tmp
+out.txt

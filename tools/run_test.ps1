@@ -23,8 +23,10 @@ Get-Process PenDriverPro-Win64-Shipping -ErrorAction SilentlyContinue | Stop-Pro
 Start-Sleep 2
 foreach ($c in "client1", "client2") {
     $mod = Join-Path $root "$c\$bin\ue4ss\Mods\PDCoopNet"
-    Copy-Item $ModSource "$mod\Scripts\main.lua" -Force
+    Copy-Item (Join-Path (Split-Path $ModSource) "*.lua") "$mod\Scripts\" -Force   # main.lua and its modules
     Set-Content -Encoding ascii "$mod\role.txt" $roles[$c]
+    # PDCoopDev (dev/dev_session.ps1) must not open maps on its own during a test
+    Remove-Item (Join-Path $root "$c\$bin\ue4ss\Mods\PDCoopDev\dev.txt") -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $root "$c\$bin\ue4ss\UE4SS.log") -ErrorAction SilentlyContinue
 }
 $runStart = Get-Date

@@ -14,7 +14,7 @@ if (-not $ModSource) { $ModSource = Join-Path $Root "mods-src\PDCoopNet\Scripts\
 Get-Process PenDriverPro-Win64-Shipping -ErrorAction SilentlyContinue | Stop-Process -Confirm:$false
 Start-Sleep 2
 $mod = Join-Path $Root "client1\$bin\ue4ss\Mods\PDCoopNet"
-Copy-Item $ModSource "$mod\Scripts\main.lua" -Force
+Copy-Item (Join-Path (Split-Path $ModSource) "*.lua") "$mod\Scripts\" -Force
 Set-Content -Encoding ascii "$mod\role.txt" "host`n$Map`n$Scenario"
 $log = Join-Path $Root "client1\$bin\ue4ss\UE4SS.log"
 Remove-Item $log -ErrorAction SilentlyContinue

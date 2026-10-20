@@ -22,6 +22,9 @@ listen-server netcode and driven by a [UE4SS](https://github.com/UE4SS-RE/RE-UE4
 | Test runs report game crashes (crash reporters are closed, dumps kept) | all | yes |
 | Shared world items: player 2 sees the host's items in the same places, picks them up into their own inventory, the host's copy disappears; the host's pickups disappear for player 2 | `loot` | 25/25 |
 | Visible bodies: each player sees the other player's body (on foot and seated), never their own; the driver's body is not hidden for the passenger | `rejoincar`, `loot` | 33/33, 25/25 |
+| Shared car trunk: either player puts items in or takes them out, the other sees it; changes made at the same moment merge | `dev/test_carsync.ps1` | 15/15 |
+| Car part health, fuel and battery follow the host; damage only on player 2's side is undone; a repair by player 2 reaches the host | `dev/test_carsync.ps1` | 15/15 |
+| Player 2's inventory is saved on the host and given back when player 2 joins again (also after a full game restart) | `dev/test_carsync.ps1`, `rejoincar` | 15/15, 33/33 |
 | Seated bodies are lowered into the seat and do not collide with the car; the passenger's camera mirrors the driver's | `rejoincar` | pass |
 
 A joining or re-joining player always appears next to what the host controls right now (the host's character,
@@ -29,8 +32,15 @@ or the car, in which case they are seated as a passenger). Saved positions and t
 
 ## Known gaps
 
-- World items are shared (host is the truth), but **inventories are per player** and are not synced or saved
-  for player 2. Car parts, car damage, quests, crafting and saves are not synced.
+- World items and the car trunk are shared (host is the truth); **inventories are per player**. Player 2's
+  inventory (pockets and hand) is saved on the host in `ue4ss/Mods/PDCoopNet/save_<id>.txt`; the id is in
+  player 2's `ue4ss/Mods/PDCoopNet/player_id.txt` (keep that file to keep the inventory). Equipment slots,
+  hotbar, health and other player 2 state are not saved.
+- Items that cross the network (trunk, saved inventory) are recreated from their type: durability, fuel in a
+  can or a battery's charge are reset to the item's default.
+- Car: part health, fuel and battery follow the host. A refuel or charge done by player 2 is lost (only repairs
+  are sent to the host). Installing, removing or losing parts (a door torn off) is not synced. Other car
+  containers (roof storage, upgrades) are not synced. Quests, crafting and the host's saves are not synced.
 - Dropping an item by player 2 is implemented (sent to the host) but not tested.
 - Fixtures such as the garage gas pump handles are mirrored too; if player 2 stands next to one when a map
   loads, the mod could mistake the pump taking its handle for a pickup and remove the host's handle.
@@ -53,7 +63,7 @@ or the car, in which case they are seated as a passenger). Saved positions and t
    `experimental-latest` dev build `zDEV-UE4SS_v3.0.1-1181-g83330635.zip`
    (SHA-256 `82378cd7f679d055026286f11347355ac67c712f21eb892060c902bb0184b907`), from the
    [official releases](https://github.com/UE4SS-RE/RE-UE4SS/releases).
-2. Copy `mod/PDCoopNet` into `<game dir>/PenDriverPro/Binaries/Win64/ue4ss/Mods/` and add the line
+2. Copy `mod/PDCoopNet` (with both `Scripts/main.lua` and `Scripts/carsync.lua`) into `<game dir>/PenDriverPro/Binaries/Win64/ue4ss/Mods/` and add the line
    `PDCoopNet : 1` to `ue4ss/Mods/mods.txt` (above `Keybinds : 1`).
 3. Create `ue4ss/Mods/PDCoopNet/role.txt`:
    - host: one line `host`
@@ -83,7 +93,8 @@ powershell -File tools/run_test.ps1 -Root C:\PDCoop -Name mytest -Seconds 300 -S
 hardlinks to the first, with its own `PenDriverPro/Binaries/Win64`). Both are started with `-NotInstalled`, so
 each copy keeps its settings, logs and saves in its own `PenDriverPro/Saved` instead of `%LOCALAPPDATA%`.
 Scenarios: `car`, `rejoincar`, `travel`, `gametravel`, `loot` (bots do the driving, walking, travelling and
-looting). `tools/run_single.ps1` runs one copy for quick probes.
+looting). `tools/run_single.ps1` runs one copy for quick probes. Developer tools (command file, cheats,
+`dev/test_carsync.ps1`) are in [`dev/`](dev/README.md); they are not part of the mod.
 `tools/paklist.py` and `tools/pakextract.py` list and extract files from the game's own pak v11 archives
 (unencrypted, Zlib) for research; never redistribute extracted files.
 

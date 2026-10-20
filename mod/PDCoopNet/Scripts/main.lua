@@ -1,6 +1,6 @@
 -- PDCoopNet v4: Pacific Drive co-op experiments.
 -- Role comes from ue4ss/Mods/PDCoopNet/role.txt (line 1: host|client|off, line 2: map or address,
--- line 3: scenario play|car|rejoincar|travel|gametravel, default play).
+-- line 3: scenario play|car|rejoincar|travel|gametravel|lootprobe|itemprobe|channel|loot, default play).
 -- play: no test bots. Keys: F8 host = host the current map (servertravel ?listen), F8 client = connect to the
 -- host in line 2; F6 client = sit in the host's car as passenger, F7 client = get out.
 -- The other scenarios are automated tests driven by bots (tools/run_test.ps1).
@@ -129,6 +129,83 @@ local function hostLookAndShoot(key, tagText)
             return
         end
     end
+end
+
+-- loot probe: list every active world item (AItemWorldManifestation and subclasses, not the ones in a pool)
+local function dumpLoot(tagText)
+    local n, pooled, reps = 0, 0, 0
+    local byArch = {}
+    for _, a in ipairs(FindAllOf("ItemWorldManifestation") or {}) do
+        if valid(a) then
+            local okP, isPooled = pcall(function() return a:IsPooled() end)
+            if okP and isPooled then
+                pooled = pooled + 1
+            else
+                n = n + 1
+                local arch = "?"
+                pcall(function() arch = a.Instance.Archetype:GetFName():ToString() end)
+                local rep = "?"
+                pcall(function() rep = tostring(a.bReplicates); if a.bReplicates then reps = reps + 1 end end)
+                byArch[arch] = (byArch[arch] or 0) + 1
+                log("LOOT|%s|%s|%s|%s|%s|rep=%s|role=%s", ROLE, tagText, className(a), arch, fmtLoc(a), rep, tostring(a.Role))
+            end
+        end
+    end
+    local spawners = #(FindAllOf("BaseItemSpawner") or {})
+    log("LOOTSUM|%s|%s|active=%d pooled=%d replicated=%d archetypes=%d spawners=%d", ROLE, tagText, n, pooled, reps,
+        (function() local c = 0; for _ in pairs(byArch) do c = c + 1 end; return c end)(), spawners)
+end
+
+local function dumpItemsDetailed(tagText)
+    local n = 0
+    for _, a in ipairs(FindAllOf("ItemWorldManifestation") or {}) do
+        if valid(a) then
+            n = n + 1
+            local arch, pooled, hidden, inst = "?", "?", "?", "?"
+            pcall(function() arch = a.Instance.Archetype:GetFName():ToString() end)
+            pcall(function() pooled = tostring(a:IsPooled()) end)
+            pcall(function() hidden = tostring(a.bHidden) end)
+            pcall(function() inst = objName(a.Instance) end)
+            log("ITEM|%s|%s|%s|arch=%s|inst=%s|pooled=%s|hidden=%s|%s|rep=%s", tagText, objName(a), className(a), arch, inst,
+                pooled, hidden, fmtLoc(a), tostring(a.bReplicates))
+        end
+    end
+    log("ITEMSUM|%s|%d world item actors", tagText, n)
+end
+
+local TEST_ARCHETYPE = "/Game/Gameplay/Inventory/Items/Resources/Basic/RawSteel/IA_Resource_Raw_Scrap_Steel.IA_Resource_Raw_Scrap_Steel"
+local function sampleArchetypes()
+    local ok, a = pcall(LoadAsset, TEST_ARCHETYPE)
+    log("ARCH LoadAsset ok=%s %s", tostring(ok), (ok and valid(a)) and a:GetFullName() or tostring(a))
+    return (ok and valid(a)) and a or nil
+end
+
+local testItem = nil       -- the actor spawned by spawnTestItem
+local function removeTestItem()
+    if not valid(testItem) then log("TESTREMOVE nothing to remove"); return end
+    local inst = testItem.Instance
+    local ok, res = pcall(function() return inst:Remove(true) end)
+    log("TESTREMOVE Instance:Remove(true) ok=%s result=%s actorStillValid=%s", tostring(ok), tostring(res), tostring(valid(testItem)))
+end
+
+local function giveTestItemToPlayer(arch)
+    local mgr = FindFirstOf("BaseInventoryManager")
+    if not (valid(mgr) and valid(arch)) then log("TESTGIVE missing inputs mgr=%s", objName(mgr)); return end
+    local ok, err = pcall(function() mgr:GiveItemToPlayer(arch) end)
+    log("TESTGIVE %s:GiveItemToPlayer ok=%s %s", objName(mgr), tostring(ok), ok and "" or tostring(err))
+end
+
+local function spawnTestItem(arch)
+    local inv = FindFirstOf("InventorySystem")
+    local lpc = localController()
+    if not (valid(inv) and valid(arch) and valid(lpc) and valid(lpc.Pawn)) then log("TESTSPAWN missing inputs"); return end
+    local l = lpc.Pawn:K2_GetActorLocation()
+    local f = lpc.Pawn:GetActorForwardVector()
+    local xf = { Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Translation = { X = l.X + f.X * 150, Y = l.Y + f.Y * 150, Z = l.Z + 50 },
+                 Scale3D = { X = 1, Y = 1, Z = 1 } }
+    local ok, res = pcall(function() return inv:SpawnItemActor(UEHelpers.GetWorldContextObject(), xf, arch, 0, 0) end)
+    log("TESTSPAWN SpawnItemActor ok=%s actor=%s at %s", tostring(ok), ok and objName(res) or tostring(res), ok and valid(res) and fmtLoc(res) or "?")
+    if ok and valid(res) then testItem = res end
 end
 
 local function status()
@@ -273,30 +350,448 @@ local function dist(a, b)
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
+-- ---------------------------------------------------------------- channels
+-- There are no RPCs of our own, so both directions ride on PlayerState names, which the engine replicates:
+--   client -> host: the client's name "PDCOOP:<cmd>:<seq>|A=<ack>" (stock reliable RPC ServerChangeName);
+--   host -> clients: the host's name "PDW:<seq>:<cmdacks>:<payload>" (GameMode:ChangeName on the host's
+--   controller), cmdacks = "<PlayerId>=<last command seq handled>/...".
+-- Both sides send one message at a time and wait for the other side's acknowledgement.
+-- exp36: messages up to 16 KB arrived intact (~0.6 s round trip); a 60 KB one never arrived, so payloads are
+-- kept under 8 KB and a message that is not acknowledged within 5 s is dropped.
+local CHAN_MAX = 8000
+local CHAN_TIMEOUT_TICKS = 25
+
+local function myPlayerId()
+    local pc = localController()
+    local id = nil
+    pcall(function() id = pc.PlayerState.PlayerId end)
+    return id
+end
+
+-- client side command queue
 local cmdSeq = 0
-local function sendCommand(cmd)
+local clientCmd = "NONE:0"
+local clientAck = 0
+local cmdQueue = {}
+local cmdInflight = nil      -- { seq, cmd, tick }
+local hostCmdAcks = {}       -- PlayerId -> seq, as last read from the host's name
+local fastTick = 0           -- 200 ms ticks of the channel loop
+local function publishClientName()
     local pc = localController()
     if not valid(pc) then return end
+    pc:ServerChangeName(CMD_PREFIX .. clientCmd .. "|A=" .. clientAck)
+end
+
+local function sendCommand(cmd)
+    table.insert(cmdQueue, cmd)
+end
+
+local function clientCommandTick()
+    if cmdInflight then
+        local acked = hostCmdAcks[myPlayerId() or -1] or 0
+        if acked >= cmdInflight.seq then
+            cmdInflight = nil
+        elseif fastTick - cmdInflight.tick > CHAN_TIMEOUT_TICKS * 2 then
+            log("CMD #%d %s not acknowledged in 10 s, resending", cmdInflight.seq, cmdInflight.cmd)
+            cmdInflight.tick = fastTick
+            publishClientName()
+            return
+        else
+            return
+        end
+    end
+    if #cmdQueue == 0 then return end
+    local cmd = table.remove(cmdQueue, 1)
     cmdSeq = cmdSeq + 1
-    pc:ServerChangeName(CMD_PREFIX .. cmd .. ":" .. cmdSeq)
+    clientCmd = cmd .. ":" .. cmdSeq
+    cmdInflight = { seq = cmdSeq, cmd = cmd, tick = fastTick }
+    publishClientName()
     log("CMD sent %s #%d", cmd, cmdSeq)
 end
 
-local lastCmd = {}          -- PlayerController full name -> last command string acted on
+-- host side: commands and acknowledgements from clients
+local lastCmdSeq = {}        -- PlayerId -> last command seq handled
+local clientAcks = {}        -- PlayerController full name -> last host message seq acknowledged
 local function remoteCommands()
     local out = {}
     for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
         if valid(pc) and not pc:IsLocalController() and valid(pc.PlayerState) then
+            local key = pc:GetFullName()
+            local pid = pc.PlayerState.PlayerId
             local ok, name = pcall(function() return pc.PlayerState:GetPlayerName():ToString() end)
-            if ok and name and name:sub(1, #CMD_PREFIX) == CMD_PREFIX and lastCmd[pc:GetFullName()] ~= name then
-                -- PlayerState:SetPlayerName did not clear the name (exp21: each command ran every 5 s), so
-                -- remember the last command string per controller instead
-                lastCmd[pc:GetFullName()] = name
-                table.insert(out, { pc = pc, cmd = (name:sub(#CMD_PREFIX + 1):match("^([^:]+)")) or "" })
+            if ok and name and name:sub(1, #CMD_PREFIX) == CMD_PREFIX then
+                local cmdPart = name:sub(#CMD_PREFIX + 1):match("^([^|]+)") or ""
+                local ack = tonumber(name:match("|A=(%d+)") or "")
+                if ack then clientAcks[key] = ack end
+                local cmd, seqStr = cmdPart:match("^(.*):(%d+)$")
+                local seq = tonumber(seqStr or "") or 0
+                if cmd and cmd ~= "NONE" and seq > (lastCmdSeq[pid] or 0) then
+                    lastCmdSeq[pid] = seq
+                    table.insert(out, { pc = pc, cmd = cmd, seq = seq })
+                end
             end
         end
     end
     return out
+end
+
+local hostOut = { queue = {}, seq = 0, inflight = nil, sentTick = 0, payload = "", acksText = "" }
+local function hostSend(payload)
+    if #payload > CHAN_MAX then
+        log("CHAN message of %d bytes is over %d, not sent", #payload, CHAN_MAX)
+        return
+    end
+    table.insert(hostOut.queue, payload)
+end
+
+local function cmdAcksText()
+    local parts = {}
+    for pid, seq in pairs(lastCmdSeq) do table.insert(parts, pid .. "=" .. seq) end
+    table.sort(parts)
+    return table.concat(parts, "/")
+end
+
+local function publishHostName()
+    local gm = UEHelpers.GetGameModeBase()
+    local ok, err = pcall(function()
+        gm:ChangeName(localController(), "PDW:" .. hostOut.seq .. ":" .. hostOut.acksText .. ":" .. hostOut.payload, false)
+    end)
+    if not ok then log("CHAN publish failed seq=%d: %s", hostOut.seq, tostring(err)) end
+end
+
+local function allClientsAcked(seq)
+    local any = false
+    for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+        if valid(pc) and not pc:IsLocalController() then
+            any = true
+            if (clientAcks[pc:GetFullName()] or 0) < seq then return false end
+        end
+    end
+    return any
+end
+
+local function hostChannelTick()
+    local acks = cmdAcksText()
+    local dirty = acks ~= hostOut.acksText
+    hostOut.acksText = acks
+    if hostOut.inflight then
+        if allClientsAcked(hostOut.inflight.seq) then
+            log("CHAN acked seq=%d bytes=%d after %d ticks", hostOut.inflight.seq, #hostOut.inflight.payload, fastTick - hostOut.sentTick)
+            hostOut.inflight = nil
+        elseif fastTick - hostOut.sentTick == CHAN_TIMEOUT_TICKS then
+            -- keep waiting: a client that is still loading reads the name once it is ready (exp40: dropping the
+            -- first message, IRESET, after 5 s would have left the client without item sync)
+            log("CHAN seq=%d (%d bytes) not acknowledged after 5 s, still waiting", hostOut.inflight.seq, #hostOut.inflight.payload)
+        end
+    end
+    if not hostOut.inflight and #hostOut.queue > 0 then
+        hostOut.payload = table.remove(hostOut.queue, 1)
+        hostOut.seq = hostOut.seq + 1
+        hostOut.inflight = { seq = hostOut.seq, payload = hostOut.payload }
+        hostOut.sentTick = fastTick
+        dirty = true
+    end
+    if dirty then publishHostName() end
+end
+
+local hostMsgHandlers = {}   -- kind -> function(rest, seq)
+local lastHostSeq = 0
+local lastHostPs = ""         -- a new host PlayerState (map change, new host session) restarts the sequence check
+local function clientChannelTick()
+    local mine = localController()
+    if not valid(mine) then return end
+    local myPs = mine.PlayerState
+    for _, ps in ipairs(FindAllOf("PlayerState") or {}) do
+        if valid(ps) and not (valid(myPs) and ps:GetFullName() == myPs:GetFullName()) then
+            local ok, name = pcall(function() return ps:GetPlayerName():ToString() end)
+            if ok and name and name:sub(1, 4) == "PDW:" then
+                if ps:GetFullName() ~= lastHostPs then lastHostPs = ps:GetFullName(); lastHostSeq = 0 end
+                local seqStr, acks, payload = name:match("^PDW:(%d+):([^:]*):(.*)$")
+                for pid, sq in (acks or ""):gmatch("(%d+)=(%d+)") do hostCmdAcks[tonumber(pid)] = tonumber(sq) end
+                local seq = tonumber(seqStr or "")
+                if seq and seq > lastHostSeq then
+                    lastHostSeq = seq
+                    local kind, rest = payload:match("^([^|]+)|?(.*)$")
+                    local h = hostMsgHandlers[kind or ""]
+                    if h then
+                        local okH, errH = pcall(h, rest or "", seq)
+                        if not okH then log("CHAN handler %s failed: %s", tostring(kind), tostring(errH)) end
+                    else
+                        log("CHAN recv seq=%d kind=%s bytes=%d (no handler)", seq, tostring(kind), #payload)
+                    end
+                    clientAck = seq
+                    publishClientName()
+                end
+            end
+        end
+    end
+end
+
+-- channel test: PING|<i>|<size>|xxx...|END
+hostMsgHandlers["PING"] = function(rest, seq)
+    local i, size, body = rest:match("^(%d+)|(%d+)|(.*)$")
+    local okBody = body and body:sub(-4) == "|END" and (#body - 4) == tonumber(size)
+    log("CHAN recv PING seq=%d i=%s size=%s intact=%s", seq, tostring(i), tostring(size), tostring(okBody))
+end
+local pingQueued = false
+local function queueChannelTest()
+    if pingQueued then return end
+    pingQueued = true
+    local sizes = { 20, 200, 1000, 4000, 7900, 7900, 20, 20, 20, 20 }
+    for i, n in ipairs(sizes) do hostSend("PING|" .. i .. "|" .. n .. "|" .. string.rep("x", n) .. "|END") end
+    log("CHAN queued %d test messages", #sizes)
+end
+
+-- ---------------------------------------------------------------- shared world items
+-- The host's world items are the truth. The host sends a diff of its world items every second; each client
+-- removes its own world loot (its spawners roll their own) and keeps a mirrored copy of each host item.
+-- Picking a mirror up runs the client's own game code (it goes into the client's inventory); the client then
+-- tells the host (PICKUP) and the host removes the original. A new local item near the client player
+-- (dropped from its inventory) is sent to the host (DROP), removed locally, and comes back as a mirror.
+-- Inventories stay per player.
+local ITEM_PREFIX = "/Game/Gameplay/Inventory/Items/"
+local SKIP_ITEM_CLASSES = { BP_GameplayEventItem_World_C = true }
+local archCache = {}
+local function archShort(path)
+    if path:sub(1, #ITEM_PREFIX) == ITEM_PREFIX then return "~" .. path:sub(#ITEM_PREFIX + 1) end
+    return path
+end
+local function archLoad(short)
+    local path = (short:sub(1, 1) == "~") and (ITEM_PREFIX .. short:sub(2)) or short
+    if archCache[path] == nil then
+        local ok, a = pcall(LoadAsset, path)
+        archCache[path] = (ok and valid(a)) and a or false
+    end
+    return archCache[path] or nil
+end
+
+-- the world items of this machine: list of { actor, id, arch, x, y, z, p, yw, r }
+local function scanWorldItems()
+    local out = {}
+    for _, a in ipairs(FindAllOf("ItemWorldManifestation") or {}) do
+        if valid(a) and not SKIP_ITEM_CLASSES[className(a)] then
+            local ok, e = pcall(function()
+                if a:K2_GetActorContext() ~= 0 then return nil end        -- EItemActorContext::World only
+                if a.bHidden then return nil end
+                -- items held by something (a gas pump's handle, a station) are fixtures, not loot: never synced
+                -- (exp38: the client's pump took the mirrored handle and the client reported a false PICKUP)
+                if valid(a:GetAttachParentActor()) then return nil end
+                local inst = a.Instance
+                if not valid(inst) or not valid(inst.Archetype) then return nil end
+                local l = a:K2_GetActorLocation()
+                if math.abs(l.X) + math.abs(l.Y) + math.abs(l.Z) < 1 then return nil end   -- parked at the origin
+                local r = a:K2_GetActorRotation()
+                return { actor = a, id = a:GetFName():ToString() .. "#" .. inst:GetFName():ToString(),
+                         -- UE4SS objects have no GetPathName (exp37: every item was skipped); take it from the full name
+                         arch = archShort(inst.Archetype:GetFullName():match("%s(%S+)$")),
+                         x = l.X, y = l.Y, z = l.Z, p = r.Pitch, yw = r.Yaw, r = r.Roll }
+            end)
+            if ok and e then table.insert(out, e) end
+        end
+    end
+    return out
+end
+
+local function fmtXf(e)
+    return string.format("%.0f,%.0f,%.0f,%.0f,%.0f,%.0f", e.x, e.y, e.z, e.p, e.yw, e.r)
+end
+
+-- host
+local hostKnown = {}          -- id -> entry
+local hostClientsKey = ""
+local function hostQueueOps(ops, header)
+    local batch, size = {}, 0
+    local function flush()
+        if #batch > 0 then hostSend("ITEMS|" .. table.concat(batch, ";")); batch, size = {}, 0 end
+    end
+    if header then hostSend(header) end
+    for _, op in ipairs(ops) do
+        if size + #op + 1 > CHAN_MAX - 100 then flush() end
+        table.insert(batch, op); size = size + #op + 1
+    end
+    flush()
+end
+
+local function hostItemsTick()
+    -- a new set of clients (join, rejoin) starts from a full list
+    local keys = {}
+    for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+        if valid(pc) and not pc:IsLocalController() then table.insert(keys, pc:GetFullName()) end
+    end
+    table.sort(keys)
+    local ck = table.concat(keys, ",")
+    if ck == "" then hostClientsKey = ""; return end
+    local reset = nil
+    if ck ~= hostClientsKey then
+        hostClientsKey = ck
+        hostKnown = {}
+        hostOut.queue = {}      -- diffs queued for the previous set of clients are stale now
+        reset = "IRESET|" .. (UEHelpers.GetWorld():GetFName():ToString())
+    end
+    local now, ops = {}, {}
+    for _, e in ipairs(scanWorldItems()) do
+        now[e.id] = e
+        local k = hostKnown[e.id]
+        if not k then
+            table.insert(ops, "A," .. e.id .. "," .. e.arch .. "," .. fmtXf(e))
+        elseif math.abs(k.x - e.x) + math.abs(k.y - e.y) + math.abs(k.z - e.z) > 20 then
+            table.insert(ops, "M," .. e.id .. "," .. fmtXf(e))
+        else
+            e = k   -- keep the sent position as the reference
+            now[e.id] = k
+        end
+    end
+    for id in pairs(hostKnown) do
+        if not now[id] then table.insert(ops, "D," .. id) end
+    end
+    hostKnown = now
+    if reset or #ops > 0 then
+        hostQueueOps(ops, reset)
+        log("ITEMSYNC host sent %d ops%s (%d world items)", #ops, reset and " after reset" or "", (function() local c = 0; for _ in pairs(now) do c = c + 1 end; return c end)())
+    end
+end
+
+local function hostItemCommand(kind, args, pc)
+    if kind == "PICKUP" then
+        local e = hostKnown[args]
+        if e and valid(e.actor) then
+            local ok, res = pcall(function() return e.actor.Instance:Remove(true) end)
+            log("ITEMSYNC PICKUP by %s: removed host item %s (%s) ok=%s", objName(pc), args, e.arch, tostring(ok and res))
+        else
+            log("ITEMSYNC PICKUP by %s: host item %s not found", objName(pc), args)
+        end
+    elseif kind == "DROP" then
+        local arch, x, y, z, pi, yw, r = args:match("^([^,]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+)$")
+        local a = arch and archLoad(arch)
+        local inv = FindFirstOf("InventorySystem")
+        if a and valid(inv) then
+            local xf = UEHelpers.GetKismetMathLibrary():MakeTransform({ X = tonumber(x), Y = tonumber(y), Z = tonumber(z) },
+                { Pitch = tonumber(pi), Yaw = tonumber(yw), Roll = tonumber(r) }, { X = 1, Y = 1, Z = 1 })
+            local ok, act = pcall(function() return inv:SpawnItemActor(UEHelpers.GetWorldContextObject(), xf, a, 0, 0) end)
+            log("ITEMSYNC DROP by %s: spawned %s on the host ok=%s %s", objName(pc), arch, tostring(ok), ok and objName(act) or tostring(act))
+        else
+            log("ITEMSYNC DROP by %s: cannot spawn %s", objName(pc), tostring(arch))
+        end
+    end
+end
+
+-- client
+local mirror = {}             -- host id -> { actor, actorName, inst }
+local mirrorByActor = {}      -- local actor full name -> host id
+local itemsArrived = 0        -- fast tick when the current map's item list started
+local function mirrorRemove(id)
+    local m = mirror[id]
+    mirror[id] = nil
+    if not m then return end
+    mirrorByActor[m.actorName] = nil
+    if valid(m.actor) then pcall(function() m.actor.Instance:Remove(true) end) end
+end
+
+local function mirrorSpawn(id, arch, x, y, z, pi, yw, r)
+    local a = archLoad(arch)
+    local inv = FindFirstOf("InventorySystem")
+    if not (a and valid(inv)) then log("ITEMSYNC cannot mirror %s (%s)", id, arch); return end
+    local xf = UEHelpers.GetKismetMathLibrary():MakeTransform({ X = x, Y = y, Z = z }, { Pitch = pi, Yaw = yw, Roll = r }, { X = 1, Y = 1, Z = 1 })
+    local act = inv:SpawnItemActor(UEHelpers.GetWorldContextObject(), xf, a, 0, 0)
+    if valid(act) then
+        local name = act:GetFullName()
+        mirror[id] = { actor = act, actorName = name, inst = act.Instance:GetFullName(), born = fastTick, x = x, y = y, z = z }
+        mirrorByActor[name] = id
+    end
+end
+
+hostMsgHandlers["IRESET"] = function(rest)
+    local n = 0
+    for id in pairs(mirror) do mirrorRemove(id); n = n + 1 end
+    itemsArrived = fastTick
+    log("ITEMSYNC reset from host (%s): dropped %d old mirrors", rest, n)
+end
+
+hostMsgHandlers["ITEMS"] = function(rest)
+    local adds, moves, dels = 0, 0, 0
+    for op in rest:gmatch("[^;]+") do
+        local kind = op:sub(1, 1)
+        if kind == "A" then
+            local id, arch, x, y, z, pi, yw, r = op:match("^A,([^,]+),([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+)$")
+            if id then
+                mirrorRemove(id)
+                mirrorSpawn(id, arch, tonumber(x), tonumber(y), tonumber(z), tonumber(pi), tonumber(yw), tonumber(r))
+                adds = adds + 1
+            end
+        elseif kind == "M" then
+            local id, x, y, z, pi, yw, r = op:match("^M,([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+)$")
+            local m = id and mirror[id]
+            if m and valid(m.actor) then
+                m.actor:K2_SetActorLocationAndRotation({ X = tonumber(x), Y = tonumber(y), Z = tonumber(z) },
+                    { Pitch = tonumber(pi), Yaw = tonumber(yw), Roll = tonumber(r) }, false, {}, true)
+                moves = moves + 1
+            end
+        elseif kind == "D" then
+            local id = op:match("^D,(.+)$")
+            if id and mirror[id] then mirrorRemove(id); dels = dels + 1 end
+        end
+    end
+    local c = 0
+    for _ in pairs(mirror) do c = c + 1 end
+    if itemsArrived == 0 then itemsArrived = fastTick end
+    log("ITEMSYNC client applied +%d ~%d -%d, %d mirrors", adds, moves, dels, c)
+end
+
+local function clientItemsTick()
+    if itemsArrived == 0 then return end
+    local myPawn = nil
+    pcall(function() myPawn = localController().Pawn end)
+    local myLoc = valid(myPawn) and myPawn:K2_GetActorLocation() or nil
+    -- 1) mirrors that disappeared without a host DEL were picked up (or used) by this player
+    for id, m in pairs(mirror) do
+        local gone = not valid(m.actor)
+        local grabbed = false
+        if not gone then
+            local ok, still = pcall(function()
+                return m.actor:K2_GetActorContext() == 0 and not m.actor.bHidden and valid(m.actor.Instance)
+                    and m.actor.Instance:GetFullName() == m.inst
+            end)
+            gone = not (ok and still)
+            -- a local fixture taking the mirror (the garage gas pump takes its handle) attaches it: not a pickup
+            pcall(function() grabbed = valid(m.actor:GetAttachParentActor()) end)
+            if grabbed then gone = true end
+            if not gone then
+                local l = m.actor:K2_GetActorLocation()
+                m.x, m.y, m.z = l.X, l.Y, l.Z
+            end
+        end
+        if gone then
+            mirror[id] = nil
+            mirrorByActor[m.actorName] = nil
+            -- only a mirror that left the world next to this player, without being attached to something, was
+            -- picked up here (exp38: fixtures took mirrors far away and the host lost its items; exp41: a 3 s
+            -- minimum age missed a pickup 1.4 s after the mirror appeared)
+            local near = myLoc and dist({ X = m.x, Y = m.y, Z = m.z }, myLoc) < 500
+            if near and not grabbed then
+                sendCommand("PICKUP," .. id)
+                log("ITEMSYNC mirror %s left the world next to this player: PICKUP sent", id)
+            else
+                log("ITEMSYNC mirror %s left the world (near=%s, attached=%s): not a pickup, dropped locally",
+                    id, tostring(near), tostring(grabbed))
+            end
+        end
+    end
+    -- 2) local world items that are not mirrors: dropped by this player (near it), or this client's own loot
+    local purged, dropped = 0, 0
+    for _, e in ipairs(scanWorldItems()) do
+        local name = e.actor:GetFullName()
+        if not mirrorByActor[name] then
+            local near = myLoc and (math.abs(e.x - myLoc.X) + math.abs(e.y - myLoc.Y) < 400)
+            if near and fastTick - itemsArrived > 50 then
+                sendCommand("DROP," .. e.arch .. "," .. fmtXf(e))
+                dropped = dropped + 1
+            else
+                purged = purged + 1
+            end
+            pcall(function() e.actor.Instance:Remove(true) end)
+        end
+    end
+    if purged + dropped > 0 then log("ITEMSYNC client removed %d local items, sent %d drops", purged, dropped) end
 end
 
 local function seatPassenger(pc, car, force)
@@ -339,9 +834,11 @@ local function hostCommandsTick()
     if #cmds == 0 then return end
     local car = playerCar()
     for _, rc in ipairs(cmds) do
-        log("CMD received %s from %s", rc.cmd, objName(rc.pc))
-        if valid(car) and rc.cmd == "SEAT" then seatPassenger(rc.pc, car)
-        elseif valid(car) and rc.cmd == "UNSEAT" then unseatPassenger(rc.pc, car) end
+        local kind, args = rc.cmd:match("^([^,]+),?(.*)$")
+        log("CMD received #%d %s from %s", rc.seq, rc.cmd:sub(1, 120), objName(rc.pc))
+        if valid(car) and kind == "SEAT" then seatPassenger(rc.pc, car)
+        elseif valid(car) and kind == "UNSEAT" then unseatPassenger(rc.pc, car)
+        elseif kind == "PICKUP" or kind == "DROP" then hostItemCommand(kind, args, rc.pc) end
     end
 end
 
@@ -751,9 +1248,87 @@ local function walkBurst()
 end
 
 -- ---------------------------------------------------------------- wiring
+-- ---------------------------------------------------------------- loot test (scenario "loot")
+-- host: puts 3 steel scrap items in front of player 2, later picks one up itself (PDP_MainCharacter."Pickup Actor");
+-- client: picks the nearest mirrored scrap up the same way and checks its own Inventory_Player.
+local lootTest = { stage = "wait", t0 = 0, hostIds = {}, clientPicked = false, logged = false }
+local SCRAP = "~Resources/Basic/RawSteel/IA_Resource_Raw_Scrap_Steel.IA_Resource_Raw_Scrap_Steel"
+
+local function hostLootTestTick()
+    if lootTest.stage == "wait" then
+        if tick < 24 then return end
+        local remoteChar = nil
+        for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+            if valid(pc) and not pc:IsLocalController() and valid(pc.Pawn) and className(pc.Pawn) == CHARACTER_CLASS then remoteChar = pc.Pawn end
+        end
+        if not valid(remoteChar) then return end
+        local inv = FindFirstOf("InventorySystem")
+        local arch = archLoad(SCRAP)
+        local l = remoteChar:K2_GetActorLocation()
+        local f = remoteChar:GetActorForwardVector()
+        local r = remoteChar:GetActorRightVector()
+        for i, side in ipairs({ -80, 0, 80 }) do
+            local xf = UEHelpers.GetKismetMathLibrary():MakeTransform(
+                { X = l.X + f.X * 200 + r.X * side, Y = l.Y + f.Y * 200 + r.Y * side, Z = l.Z + 20 }, { Pitch = 0, Yaw = 0, Roll = 0 }, { X = 1, Y = 1, Z = 1 })
+            local act = inv:SpawnItemActor(UEHelpers.GetWorldContextObject(), xf, arch, 0, 0)
+            if valid(act) then
+                local id = act:GetFName():ToString() .. "#" .. act.Instance:GetFName():ToString()
+                table.insert(lootTest.hostIds, { id = id, actor = act })
+                log("LOOTTEST host spawned %s at %s", id, fmtLoc(act))
+            end
+        end
+        lootTest.stage, lootTest.t0 = "spawned", tick
+    elseif lootTest.stage == "spawned" and tick >= lootTest.t0 + 8 then
+        lootTest.stage = "hostpicked"
+        local hostChar = hostCharacter()
+        for _, e in ipairs(lootTest.hostIds) do
+            if valid(e.actor) and e.actor:K2_GetActorContext() == 0 and valid(e.actor.Instance) then
+                local ok, err = pcall(function() callBPFunction(hostChar, "Pickup Actor", e.actor, false) end)
+                log("LOOTTEST host picks up %s itself ok=%s %s", e.id, tostring(ok), ok and "" or tostring(err))
+                return
+            end
+        end
+        log("LOOTTEST host found no test item left to pick up")
+    end
+end
+
+local function clientLootTestTick()
+    local scrap = {}
+    for id, m in pairs(mirror) do
+        if valid(m.actor) and m.actor.Instance and valid(m.actor.Instance) then
+            local okA, nm = pcall(function() return m.actor.Instance.Archetype:GetFName():ToString() end)
+            if okA and nm == "IA_Resource_Raw_Scrap_Steel" then table.insert(scrap, { id = id, actor = m.actor }) end
+        end
+    end
+    if #scrap >= 3 and not lootTest.logged then
+        lootTest.logged = true
+        for _, e in ipairs(scrap) do log("LOOTTEST client mirror %s at %s", e.id, fmtLoc(e.actor)) end
+    end
+    if #scrap >= 3 and not lootTest.clientPicked then
+        lootTest.clientPicked = true
+        local me = localController().Pawn
+        local best, bd = nil, 1e12
+        for _, e in ipairs(scrap) do
+            local d = dist(e.actor:K2_GetActorLocation(), me:K2_GetActorLocation())
+            if d < bd then best, bd = e, d end
+        end
+        local ok, err = pcall(function() callBPFunction(me, "Pickup Actor", best.actor, false) end)
+        log("LOOTTEST client picks up mirror %s (%.0f uu away) ok=%s %s", best.id, bd, tostring(ok), ok and "" or tostring(err))
+        ExecuteInGameThreadWithDelay(1500, function()
+            local mgr = FindFirstOf("BaseInventoryManager")
+            local has = false
+            pcall(function() has = valid(mgr.Inventory_Player:FindItemOfType(archLoad(SCRAP))) end)
+            local hand = false
+            pcall(function() hand = valid(mgr.Inventory_PlayerHand:FindItemOfType(archLoad(SCRAP))) end)
+            log("LOOTTEST client inventory has scrap: player=%s hand=%s", tostring(has), tostring(hand))
+        end)
+    end
+end
+
 -- ---------------------------------------------------------------- map changes
 -- Everything above caches per-map objects (controllers, characters, the car). Reset it when the world changes.
 local lastWorld = nil
+local mapTicks = 0          -- lootprobe: status ticks spent in the current map
 -- client: after losing the host, retry "open <host>" every 30 s (a pending connection gives up after its
 -- timeout while the host is still loading or re-hosting) until a gameplay map is reached again
 local rejoin = { active = false, next = 0, tries = 0 }
@@ -785,6 +1360,7 @@ local function resetPerMapState(newWorld)
     drive.phase, drive.t, drive.mode, drive.startLoc, drive.lastLoc, drive.frames = "wait", 0, "throttle", nil, nil, 0
     if rideLoop then pcall(CancelDelayedAction, rideLoop); rideLoop = nil end
     gmLogged = false
+    mapTicks = 0
 end
 
 local function hookLogger(path)
@@ -913,6 +1489,8 @@ local function hostTravelTick(worldName)
     elseif travel.stage == "servertravel" and worldName:find("Wilderness", 1, true) then
         travel.stage = "zone"; travel.t = 0
         log("TRAVEL host arrived in %s", worldName)
+    elseif travel.stage == "zone" and SCENARIO == "lootprobe" then
+        if travel.t >= 40 and not travel.dumped then travel.dumped = true; dumpLoot(worldName) end
     elseif travel.stage == "zone" and travel.t >= 45 then
         travel.stage = "quit"; travel.t = 0
         log("TRAVEL calling game QuitToMenu")
@@ -989,6 +1567,30 @@ elseif ROLE == "client" then
     RegisterKeyBind(Key.F7, onGameThread(function() sendCommand("UNSEAT") end))
 end
 
+LoopInGameThreadWithDelay(200, function()
+    fastTick = fastTick + 1
+    if not inGameplayMap() then return end
+    if ROLE == "host" then
+        local ok, err = pcall(hostCommandsTick)
+        if not ok then log("commands error: %s", tostring(err)) end
+        if fastTick % 5 == 0 then
+            ok, err = pcall(hostItemsTick)
+            if not ok then log("items error: %s", tostring(err)) end
+        end
+        ok, err = pcall(hostChannelTick)
+        if not ok then log("chan error: %s", tostring(err)) end
+    elseif ROLE == "client" then
+        local ok, err = pcall(clientChannelTick)
+        if not ok then log("chan error: %s", tostring(err)) end
+        if fastTick % 5 == 0 then
+            ok, err = pcall(clientItemsTick)
+            if not ok then log("items error: %s", tostring(err)) end
+        end
+        ok, err = pcall(clientCommandTick)
+        if not ok then log("cmd error: %s", tostring(err)) end
+    end
+end)
+
 LoopInGameThreadWithDelay(5000, function()
     do
         local function step(name, fn)
@@ -1009,7 +1611,6 @@ LoopInGameThreadWithDelay(5000, function()
         if ROLE == "host" and gameplay then
             if not gmLogged then gmLogged = true; step("gamemode", logGameModeOnce) end
             step("spawn", spawnForRemotePlayers)
-            step("commands", hostCommandsTick)
             if BOTS and SCENARIO == "rejoincar" then
                 if tick >= 22 and drive.phase == "wait" then step("shot1", function() hostLookAndShoot("walk", "host looks at player 2 walking") end) end
                 if drive.phase == "throttle" and drive.t == 25 then step("shot2", function() hostLookAndShoot("ride", "host looks at the passenger") end) end
@@ -1017,6 +1618,8 @@ LoopInGameThreadWithDelay(5000, function()
             step("bodies", revealOtherBodies)
             step("seathook", registerSeatHook)
             step("seatkeeper", startSeatKeeper)
+            if SCENARIO == "channel" and tick >= 24 then step("chantest", queueChannelTest) end
+            if SCENARIO == "loot" then step("loottest", hostLootTestTick) end
             if CAR_LIKE then
                 step("car", hostCarTick)
                 step("driveloop", ensureDriveLoop)
@@ -1026,13 +1629,27 @@ LoopInGameThreadWithDelay(5000, function()
         end
         if ROLE == "host" then
             step("rehost", function() hostRehostTick(worldName) end)
-            if SCENARIO == "gametravel" then step("gametravel", function() hostGameTravelTick(worldName) end) end
+            if SCENARIO == "gametravel" or SCENARIO == "lootprobe" then step("gametravel", function() hostGameTravelTick(worldName) end) end
         end
         if ROLE == "client" then step("rejoin", function() clientRejoinTick(worldName) end) end
         if ROLE == "host" and not gmLogged and gameplay then step("netcfg", function() applyNetTimeouts("listen") end) end
+        if gameplay and SCENARIO == "itemprobe" and ROLE == "host" then
+            mapTicks = mapTicks + 1
+            if mapTicks == 6 then step("itemdump1", function() dumpItemsDetailed("before") end) end
+            if mapTicks == 7 then step("archspawn", function() spawnTestItem(sampleArchetypes()) end) end
+            if mapTicks == 8 then step("itemdump2", function() dumpItemsDetailed("after-spawn") end) end
+            if mapTicks == 9 then step("remove", removeTestItem) end
+            if mapTicks == 10 then step("itemdump3", function() dumpItemsDetailed("after-remove") end) end
+            if mapTicks == 11 then step("give", function() giveTestItemToPlayer(sampleArchetypes()) end) end
+        end
+        if gameplay and SCENARIO == "lootprobe" then
+            mapTicks = mapTicks + 1
+            if mapTicks == 8 then step("lootdump", function() dumpLoot(worldName) end) end
+        end
         if ROLE == "client" and gameplay then
             step("dedupe", dedupeCar)
             step("bodies", revealOtherBodies)
+            if SCENARIO == "loot" then step("loottest", clientLootTestTick) end
             step("seathook", registerSeatHook)
             local bound = false
             step("bind", function() bound = bindClientCharacter() end)

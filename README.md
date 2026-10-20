@@ -20,14 +20,18 @@ listen-server netcode and driven by a [UE4SS](https://github.com/UE4SS-RE/RE-UE4
 | The game's own map change (e.g. new game, quit to menu): host re-hosts the new map, the client reconnects and spawns next to the host | `gametravel` | 15/15 (2 n/a) |
 | Start of a new game (player starts seated in the intro car): one car on the client, player 2 seated as passenger, not on top of the host | `gametravel` | 15/15 |
 | Test runs report game crashes (crash reporters are closed, dumps kept) | all | yes |
+| Shared world items: player 2 sees the host's items in the same places, picks them up into their own inventory, the host's copy disappears; the host's pickups disappear for player 2 | `loot` | 21/21 |
 
 A joining or re-joining player always appears next to what the host controls right now (the host's character,
 or the car, in which case they are seated as a passenger). Saved positions and the garage are never used.
 
 ## Known gaps
 
-- Only the host's game is the real game: loot, inventory, car parts, damage, quests and saves are **not**
-  synced. The second player is a companion who can walk around and ride along.
+- World items are shared (host is the truth), but **inventories are per player** and are not synced or saved
+  for player 2. Car parts, car damage, quests, crafting and saves are not synced.
+- Dropping an item by player 2 is implemented (sent to the host) but not tested.
+- Fixtures such as the garage gas pump handles are mirrored too; if player 2 stands next to one when a map
+  loads, the mod could mistake the pump taking its handle for a pickup and remove the host's handle.
 - The game's own map changes drop the listen server; the mod re-hosts by loading the map a second time
   (+15-30 s per map change), and clients reconnect (retry every 30 s).
 - The passenger does not play a sitting animation; camera and visuals were not checked by a human.

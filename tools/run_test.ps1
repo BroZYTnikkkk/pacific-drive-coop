@@ -5,7 +5,7 @@ param(
     [string]$Name = "test",
     [string]$Map = "/Game/Maps/RunProto/RB_Garage",
     [int]$Seconds = 240,
-    [ValidateSet("play", "car", "rejoincar", "travel", "gametravel")][string]$Scenario = "car",
+    [ValidateSet("play", "car", "rejoincar", "travel", "gametravel", "lootprobe", "channel", "loot")][string]$Scenario = "car",
     # folder that holds client1 and client2 (two copies of the game with UE4SS)
     [string]$Root = "C:\PDCoop",
     # mod source; defaults to ..\mod next to this script (repo layout), else <Root>\mods-src
@@ -125,7 +125,7 @@ if ($Scenario -eq "rejoincar") {
     Select-String -Path $hostLog -Pattern "\] (SPAWN|SEAT|PRETRAVEL)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
     Select-String -Path $clientLog -Pattern "\] (DROPTEST|REJOIN|RIDE riding|MAPCHANGE)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
 }
-if ($Scenario -eq "gametravel") {
+if ($Scenario -in @("gametravel", "lootprobe")) {
     $hostEv = @(Select-String -Path $hostLog -Pattern "\] (GAMETRAVEL|REHOST|MAPCHANGE)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) })
     $newMap = (Select-String -Path $hostLog -Pattern "GAMETRAVEL host arrived in (\S+)" | Select-Object -First 1 | ForEach-Object { $_.Matches[0].Groups[1].Value })
     $checks["game's own UserNewGame travelled the host to a gameplay map ($newMap)"] = [bool]$newMap
@@ -170,6 +170,51 @@ if ($Scenario -eq "gametravel") {
     Write-Output "===== GAMETRAVEL client events"
     Select-String -Path $clientLog -Pattern "\] (REJOIN|MAPCHANGE|console:)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) } | Select-Object -First 20
     Select-String -Path "$out\client2-PenDriverPro.log" -Pattern "LogNet: (Browse|Welcomed)|NetworkFailure" | Select-Object -Last 12 | ForEach-Object { $_.Line.Substring(0, [Math]::Min(220, $_.Line.Length)) }
+}
+if ($Scenario -eq "loot") {
+    $hl = Get-Content $hostLog; $cl = Get-Content $clientLog
+    $checks["client got the host's item list (reset)"] = [bool]($cl | Select-String -Pattern "ITEMSYNC reset from host" -Quiet)
+    $checks["client removed its own local items"] = [bool]($cl | Select-String -Pattern "ITEMSYNC client removed [1-9]\d* local items" -Quiet)
+    $spawned = @($hl | Select-String -Pattern "LOOTTEST host spawned (\S+) at (-?\d+),(-?\d+),(-?\d+)")
+    $mirrors = @($cl | Select-String -Pattern "LOOTTEST client mirror (\S+) at (-?\d+),(-?\d+),(-?\d+)")
+    $checks["host spawned 3 test items ($($spawned.Count))"] = $spawned.Count -eq 3
+    $checks["client mirrors all 3 ($($mirrors.Count))"] = $mirrors.Count -ge 3
+    $maxd = 0; $matched = 0
+    foreach ($sp in $spawned) {
+        $id = $sp.Matches[0].Groups[1].Value
+        $m = $mirrors | Where-Object { $_.Matches[0].Groups[1].Value -eq $id } | Select-Object -First 1
+        if ($m) {
+            $matched++
+            $dx = [double]$sp.Matches[0].Groups[2].Value - [double]$m.Matches[0].Groups[2].Value
+            $dy = [double]$sp.Matches[0].Groups[3].Value - [double]$m.Matches[0].Groups[3].Value
+            $d = [math]::Sqrt($dx * $dx + $dy * $dy); if ($d -gt $maxd) { $maxd = [math]::Round($d) }
+        }
+    }
+    $checks["mirrors sit where the host items are ($matched matched, max $maxd uu < 60)"] = ($matched -eq 3) -and ($maxd -lt 60)
+    $checks["client picked a mirror up with the game's own Pickup Actor"] = [bool]($cl | Select-String -Pattern "LOOTTEST client picks up mirror .* ok=true" -Quiet)
+    $checks["the scrap is in the client's inventory"] = [bool]($cl | Select-String -Pattern "LOOTTEST client inventory has scrap: player=true|hand=true" -Quiet)
+    $checks["host removed the item the client picked up"] = [bool]($hl | Select-String -Pattern "ITEMSYNC PICKUP by .* removed host item .* ok=true" -Quiet)
+    # exp38: false PICKUPs for garage fixtures (gas pump handles) removed host items; only the test item may come back
+    $pk = @($hl | Select-String -Pattern "ITEMSYNC PICKUP by .*: (removed host item|host item) (\S+)")
+    $pkNonScrap = @($pk | Where-Object { $_.Line -notmatch "IA_Resource_Raw_Scrap_Steel" })
+    $checks["no false PICKUP of other items ($($pkNonScrap.Count) of $($pk.Count))"] = ($pk.Count -eq 1) -and ($pkNonScrap.Count -eq 0)
+    $checks["host picked one up itself"] = [bool]($hl | Select-String -Pattern "LOOTTEST host picks up .* ok=true" -Quiet)
+    $checks["client mirror vanished after the host pickup"] = [bool]($cl | Select-String -Pattern "ITEMSYNC client applied \+0 ~\d+ -[1-9]" -Quiet)
+    Write-Output "===== LOOT"
+    Select-String -Path $hostLog, $clientLog -Pattern "LOOTTEST|ITEMSYNC (reset|PICKUP|DROP|cannot)|ITEMSYNC client removed|items error|cmd error|CMD (sent|received)" | Select-Object -First 40 | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
+}
+if ($Scenario -eq "channel") {
+    $recv = @(Select-String -Path $clientLog -Pattern "CHAN recv PING seq=\d+ i=(\d+) size=(\d+) intact=true")
+    $acks = @(Select-String -Path $hostLog -Pattern "CHAN acked seq=\d+ bytes=(\d+) after (\d+) ticks")
+    $checks["client received all 10 host messages intact ($($recv.Count))"] = $recv.Count -eq 10
+    $checks["host saw all 10 acknowledged ($($acks.Count))"] = $acks.Count -eq 10
+    Write-Output "===== CHANNEL"
+    $acks | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
+    Select-String -Path $clientLog, $hostLog -Pattern "CHAN (send failed|handler|recv PING .*intact=false)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
+}
+if ($Scenario -eq "lootprobe") {
+    Write-Output "===== LOOT"
+    Select-String -Path $hostLog, $clientLog -Pattern "LOOTSUM" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
 }
 if ($Scenario -eq "travel") {
     $hz = @(Select-String -Path $hostLog -Pattern "PDNET\|host\|.*map=Wilderness_Forest_01" | ForEach-Object { $_.Line })

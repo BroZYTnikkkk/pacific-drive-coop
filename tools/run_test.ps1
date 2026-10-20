@@ -235,6 +235,31 @@ if ($Scenario -eq "travel") {
 $checks["no game crash during the run ($($crashes.Count))"] = $crashes.Count -eq 0
 if ($crashes.Count) { Write-Output "===== CRASHES"; $crashes }
 
+# bodies: each side shows the other player's body and never its own
+if ($Scenario -in @("car", "rejoincar", "loot")) {
+    foreach ($side in @(@{ n = "host"; f = $hostLog }, @{ n = "client"; f = $clientLog })) {
+        $shown = @(Select-String -Path $side.f -Pattern "BODY (\S+) visible" | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -Unique)
+        # own character = the one listed as [local] in this side's status lines (on the host also its manager's
+        # character, used while the host is driving); the client's manager first points at the host (exp44)
+        $own = @(Select-String -Path $side.f -Pattern "PDP_MainCharacter_C:(\d+)\[local\|" | ForEach-Object { "PDP_MainCharacter_C_" + $_.Matches[0].Groups[1].Value } | Select-Object -Unique)
+        if ($side.n -eq "host") { $own += @(Select-String -Path $side.f -Pattern "cmChar=(PDP_MainCharacter_C_\d+)" | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -Unique) }
+        $wrong = @($shown | Where-Object { $own -contains $_ })
+        $checks["$($side.n) shows the other player's body ($($shown.Count) shown)"] = $shown.Count -ge 1
+        $checks["$($side.n) never shows its own body ($($wrong.Count) wrong)"] = $wrong.Count -eq 0
+    }
+}
+if ($Scenario -in @("car", "rejoincar")) {
+    $checks["host lowers the seated passenger and turns its collision off"] = [bool](Select-String -Path $hostLog -Pattern "BODY .* seated: mesh lowered" -Quiet) -and [bool](Select-String -Path $hostLog -Pattern "BODY .* seated: collision off" -Quiet)
+    $checks["client lowers the seated driver"] = [bool](Select-String -Path $clientLog -Pattern "BODY .* seated: mesh lowered" -Quiet)
+    # exp45: the passenger saw an empty driver's seat (the game hides the driving character, hidden replicates)
+    foreach ($side in @(@{ n = "host"; f = $hostLog }, @{ n = "client"; f = $clientLog })) {
+        $st = @(Select-String -Path $side.f -Pattern "BODYSTATE\|\w+\|\S+\|seated=true\|hidden=(\w+)\|rendered=(\w+)\|mat=(\w+)")
+        $ok = @($st | Where-Object { $_.Matches[0].Groups[1].Value -eq "false" -and $_.Matches[0].Groups[3].Value -eq "DefaultMaterial" })
+        $rend = @($st | Where-Object { $_.Matches[0].Groups[2].Value -eq "true" })
+        $checks["$($side.n): the other player in the car is not hidden and has the body material ($($ok.Count) of $($st.Count) samples, rendered in $($rend.Count))"] = ($st.Count -gt 0) -and ($ok.Count -eq $st.Count)
+    }
+}
+
 # gametravel leaves the garage after ~20 s on purpose, too short for the walking bursts: not applicable there
 $skip = @()
 if ($Scenario -eq "gametravel") { $skip = @("client walking moves its character on the host (>=3 distinct positions)", "host movement visible on client (>=2 distinct positions)") }

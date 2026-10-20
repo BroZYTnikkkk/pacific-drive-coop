@@ -82,25 +82,112 @@ local function managers()
 end
 
 -- ---------------------------------------------------------------- status
+-- Bodies. PDP_MainCharacter's mesh is the ALS mannequin with the invisible M_PlayerCharacter_Invist material.
+-- Other players' characters get a real material on every machine; your own stays invisible (first person).
+-- "Mine" is not "locally controlled": while driving, the host controls the car and its character has no
+-- controller, so the old check showed the host its own body in the driver's seat. Mine = the pawn of my
+-- controller or the character my BP_MainCharacterManager points at.
+-- Characters sitting in a car are lowered (there is no sitting animation) and do not collide with the car.
 local BODY_MATERIAL = "/Engine/EngineMaterials/DefaultMaterial.DefaultMaterial"
-local revealed = {}        -- character full name -> true
-local function revealOtherBodies()
-    local mat = nil
+local SEATED_DROP = 50       -- uu the mannequin mesh is lowered while sitting in a car
+local bodies = {}            -- character full name -> body state
+local bodyMat = nil
+
+local function isMyCharacter(ch)
+    local name = ch:GetFullName()
+    local lpc = localController()
+    if valid(lpc) and valid(lpc.Pawn) and lpc.Pawn:GetFullName() == name then return true end
+    if ROLE == "client" then
+        -- on a client the manager first points at the host's character (the first one that arrives, exp44);
+        -- the client's own character is the autonomous proxy, also while it sits in the car
+        local okR, r = pcall(function() return ch.Role end)
+        return okR and r == 2
+    end
+    -- on the host every character not controlled by a remote player is the host's own (the parked driver has no
+    -- controller; the manager briefly points at a newly spawned player 2, exp48)
+    local okC, remote = pcall(function() return valid(ch.Controller) and not ch.Controller:IsLocalController() end)
+    return not (okC and remote)
+end
+
+local function logBodyStates()
     for _, ch in ipairs(FindAllOf(CHARACTER_CLASS) or {}) do
-        if valid(ch) and not revealed[ch:GetFullName()] then
-            local mine = false
-            pcall(function() mine = valid(ch.Controller) and ch.Controller:IsLocalController() end)
-            -- on a client, the host's character has no controller there; it is "other" too
-            if not mine then
-                mat = mat or LoadAsset(BODY_MATERIAL)
-                local ok, err = pcall(function()
-                    local mesh = ch.Mesh
-                    mesh:SetMaterial(0, mat)
-                    mesh:SetMaterial(1, mat)
+        -- characters the body update has not seen yet (it runs every 200 ms) have no state to report
+        if valid(ch) and not isMyCharacter(ch) and bodies[ch:GetFullName()] then
+            local seated, hid, rendered, matName = false, "?", "?", "?"
+            pcall(function() seated = isCar(ch:GetAttachParentActor()) end)
+            pcall(function() hid = tostring(ch.bHidden) end)
+            pcall(function() rendered = tostring(ch.Mesh:WasRecentlyRendered(0.5)) end)
+            pcall(function() matName = ch.Mesh:GetMaterial(0):GetFName():ToString() end)
+            log("BODYSTATE|%s|%s|seated=%s|hidden=%s|rendered=%s|mat=%s|%s", ROLE, objName(ch), tostring(seated), hid, rendered, matName, fmtLoc(ch))
+        end
+    end
+end
+
+local function updateBodies()
+    for _, ch in ipairs(FindAllOf(CHARACTER_CLASS) or {}) do
+        if valid(ch) then
+            local key = ch:GetFullName()
+            local mesh = ch.Mesh
+            local b = bodies[key]
+            if not b then
+                local rl = mesh.RelativeLocation
+                b = { orig0 = mesh:GetMaterial(0), orig1 = mesh:GetMaterial(1), rel = { X = rl.X, Y = rl.Y, Z = rl.Z },
+                      state = "new", applied = 0 }
+                bodies[key] = b
+            end
+            local mine = isMyCharacter(ch)
+            if mine then
+                if b.state == "shown" then
+                    mesh:SetMaterial(0, b.orig0)
+                    mesh:SetMaterial(1, b.orig1)
+                    mesh:SetCastShadow(false)
+                    log("BODY %s is mine: invisible again", objName(ch))
+                end
+                b.state = "own"
+            else
+                bodyMat = bodyMat or LoadAsset(BODY_MATERIAL)
+                local cur = mesh:GetMaterial(0)
+                if not (valid(cur) and cur:GetFullName() == bodyMat:GetFullName()) then
+                    mesh:SetMaterial(0, bodyMat)
+                    mesh:SetMaterial(1, bodyMat)
                     mesh:SetCastShadow(true)
-                end)
-                revealed[ch:GetFullName()] = true
-                log("BODY %s visible with %s ok=%s %s", objName(ch), BODY_MATERIAL, tostring(ok), ok and "" or tostring(err))
+                    b.applied = b.applied + 1
+                    log("BODY %s visible (%s), applied %d time(s)%s", objName(ch), BODY_MATERIAL, b.applied,
+                        b.applied > 1 and ": the game had reset it" or "")
+                end
+                b.state = "shown"
+                local hid = false
+                pcall(function() hid = ch.bHidden end)
+                if hid then
+                    ch:SetActorHiddenInGame(false)
+                    b.unhid = (b.unhid or 0) + 1
+                    if b.unhid == 1 or b.unhid % 30 == 0 then
+                        log("BODY %s was hidden by the game: shown again (%d times)", objName(ch), b.unhid)
+                    end
+                end
+                pcall(function() mesh:SetHiddenInGame(false, false) end)
+                pcall(function() mesh:SetVisibility(true, false) end)
+            end
+            -- sitting in a car
+            local seated = false
+            pcall(function() seated = isCar(ch:GetAttachParentActor()) end)
+            if seated and not mine and not b.lowered then
+                mesh:K2_SetRelativeLocation({ X = b.rel.X, Y = b.rel.Y, Z = b.rel.Z - SEATED_DROP }, false, {}, true)
+                b.lowered = true
+                log("BODY %s seated: mesh lowered %d uu", objName(ch), SEATED_DROP)
+            elseif not seated and b.lowered then
+                mesh:K2_SetRelativeLocation({ X = b.rel.X, Y = b.rel.Y, Z = b.rel.Z }, false, {}, true)
+                b.lowered = false
+                log("BODY %s left the car: mesh back", objName(ch))
+            end
+            if seated and not b.collisionOff then
+                ch:SetActorEnableCollision(false)
+                b.collisionOff = true
+                log("BODY %s seated: collision off (mine=%s)", objName(ch), tostring(mine))
+            elseif not seated and b.collisionOff then
+                ch:SetActorEnableCollision(true)
+                b.collisionOff = false
+                log("BODY %s left the car: collision on", objName(ch))
             end
         end
     end
@@ -112,23 +199,43 @@ local function screenshot(tagText)
     console("HighResShot 1")
 end
 
--- host: turn the camera to the other player and take a screenshot (visual check of bodies and seats)
+-- turn this machine's camera to the other player's character and take a screenshot
 local hostShots = {}
-local function hostLookAndShoot(key, tagText)
+local function lookAndShoot(key, tagText)
     if hostShots[key] then return end
     local lpc = localController()
     if not valid(lpc) then return end
-    for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
-        if valid(pc) and not pc:IsLocalController() and valid(pc.Pawn) and className(pc.Pawn) == CHARACTER_CLASS then
+    for _, ch in ipairs(FindAllOf(CHARACTER_CLASS) or {}) do
+        if valid(ch) and not isMyCharacter(ch) then
             hostShots[key] = true
             local camLoc = lpc.PlayerCameraManager:GetCameraLocation()
-            local target = pc.Pawn:K2_GetActorLocation()
+            local target = ch:K2_GetActorLocation()
             local rot = UEHelpers.GetKismetMathLibrary():FindLookAtRotation(camLoc, target)
             lpc:SetControlRotation(rot)
+            log("SHOT aiming at %s (%.0f uu away)", objName(ch), math.sqrt((camLoc.X - target.X) ^ 2 + (camLoc.Y - target.Y) ^ 2 + (camLoc.Z - target.Z) ^ 2))
             ExecuteInGameThreadWithDelay(400, function() screenshot(tagText) end)
             return
         end
     end
+end
+local function hostLookAndShoot(key, tagText) lookAndShoot(key, tagText) end
+
+local function logCamRel(car, tagText)
+    local lpc = localController()
+    if not (valid(lpc) and isCar(car)) then return end
+    local ok, err = pcall(function()
+        local cam = lpc.PlayerCameraManager:GetCameraLocation()
+        local rel = UEHelpers.GetKismetMathLibrary():InverseTransformLocation(car:GetTransform(), cam)
+        log("CAMREL|%s|%s|%.0f,%.0f,%.0f", ROLE, tagText, rel.X, rel.Y, rel.Z)
+    end)
+    if not ok then log("CAMREL failed: %s", tostring(err)) end
+end
+
+local function shootForward(car, tagText)
+    local lpc = localController()
+    if not (valid(lpc) and isCar(car)) then return end
+    lpc:SetControlRotation(car:K2_GetActorRotation())
+    ExecuteInGameThreadWithDelay(400, function() screenshot(tagText) end)
 end
 
 -- loot probe: list every active world item (AItemWorldManifestation and subclasses, not the ones in a pool)
@@ -311,6 +418,7 @@ local function spawnForRemotePlayers()
                     -- possession can make the game seat the character itself (intro: into the driver's seat,
                     -- on top of the host), so seat it as passenger once now and once a moment later
                     log("SPAWN host is in %s: seating %s as passenger", objName(hostCar), objName(actor))
+                    pcall(updateBodies)
                     pcall(seatNewPlayerInCar, pc, hostCar)
                     local carName = hostCar:GetFullName()
                     ExecuteInGameThreadWithDelay(1500, function()
@@ -811,6 +919,7 @@ local function seatPassenger(pc, car, force)
     seated[ch:GetFullName()] = car:GetFullName()
     local parent = ch:GetAttachParentActor()
     log("SEAT %s attached to %s (parent=%s) at %s", objName(ch), objName(car), objName(parent), fmtLoc(ch))
+    pcall(updateBodies)
 end
 
 seatNewPlayerInCar = seatPassenger
@@ -1116,10 +1225,25 @@ local function clientCarTick()
         log("RIDE parent=%s charLoc=%s carLoc=%s charToCar=%.0f", objName(parent), fmtLoc(ch), fmtLoc(car),
             dist(ch:K2_GetActorLocation(), car:K2_GetActorLocation()))
     end
-    if valid(parent) then rideTicks = rideTicks + 1 end
+    if valid(parent) then
+        rideTicks = rideTicks + 1
+        if rideTicks <= 3 then
+            local cm = managers()
+            local oob, water, pct, carState = "?", "?", "?", "?"
+            pcall(function() oob = tostring(cm.IsPlayerOutOfBounds) end)
+            pcall(function() water = tostring(cm.InWater) end)
+            pcall(function() pct = tostring(ch.PercentInCar) end)
+            pcall(function() local _, carm = managers(); carState = tostring(carm.PlayerCarState) end)
+            log("RIDEFX outOfBounds=%s inWater=%s percentInCar=%s playerCarState=%s", oob, water, pct, carState)
+        end
+        if rideTicks == 2 and BOTS then
+            logCamRel(parent, "passenger")
+            shootForward(parent, "client riding as passenger, looks forward")
+        end
+    end
     if SCENARIO == "rejoincar" and droppedOnce and not unseatSent and rideTicks >= 6 then
         unseatSent = true
-        screenshot("client riding as passenger after rejoin")
+        lookAndShoot("ride-client", "client riding as passenger, looks at the driver")
         log("UNSEATTEST riding again for %d s after the rejoin, asking to get out", rideTicks * 5)
         sendCommand("UNSEAT")
     end
@@ -1241,7 +1365,10 @@ local function walkBurst()
         frames = frames + 1
         local pc = localController()
         if valid(pc) and valid(pc.Pawn) and not seatRequested then
-            pc.Pawn:AddMovementInput({ X = 1, Y = 0, Z = 0 }, 1.0, true)
+            -- alternate the direction so the bot does not stay against a wall (exp45)
+            -- (not in "loot": there the bot must stay near the test items, exp51 walked 863 uu away)
+            local dir = (SCENARIO ~= "loot" and math.floor(tick / 2) % 2 == 1) and -1 or 1
+            pc.Pawn:AddMovementInput({ X = dir, Y = 0, Z = 0 }, 1.0, true)
         end
         if frames >= 180 then walking = false; CancelDelayedAction(handle) end
     end)
@@ -1278,6 +1405,7 @@ local function hostLootTestTick()
             end
         end
         lootTest.stage, lootTest.t0 = "spawned", tick
+        ExecuteInGameThreadWithDelay(3000, function() lookAndShoot("loot-host", "host looks at player 2 next to the scrap") end)
     elseif lootTest.stage == "spawned" and tick >= lootTest.t0 + 8 then
         lootTest.stage = "hostpicked"
         local hostChar = hostCharacter()
@@ -1302,6 +1430,7 @@ local function clientLootTestTick()
     end
     if #scrap >= 3 and not lootTest.logged then
         lootTest.logged = true
+        lookAndShoot("loot-client", "client looks at the host")
         for _, e in ipairs(scrap) do log("LOOTTEST client mirror %s at %s", e.id, fmtLoc(e.actor)) end
     end
     if #scrap >= 3 and not lootTest.clientPicked then
@@ -1570,6 +1699,10 @@ end
 LoopInGameThreadWithDelay(200, function()
     fastTick = fastTick + 1
     if not inGameplayMap() then return end
+    do  -- every 200 ms: a new body gets its material within one tick (exp49: one sample before the 1 s update)
+        local okB, errB = pcall(updateBodies)
+        if not okB then log("bodies error: %s", tostring(errB)) end
+    end
     if ROLE == "host" then
         local ok, err = pcall(hostCommandsTick)
         if not ok then log("commands error: %s", tostring(err)) end
@@ -1614,8 +1747,8 @@ LoopInGameThreadWithDelay(5000, function()
             if BOTS and SCENARIO == "rejoincar" then
                 if tick >= 22 and drive.phase == "wait" then step("shot1", function() hostLookAndShoot("walk", "host looks at player 2 walking") end) end
                 if drive.phase == "throttle" and drive.t == 25 then step("shot2", function() hostLookAndShoot("ride", "host looks at the passenger") end) end
+                if drive.phase == "throttle" and drive.t == 20 then step("camrel", function() logCamRel(playerCar(), "driver") end) end
             end
-            step("bodies", revealOtherBodies)
             step("seathook", registerSeatHook)
             step("seatkeeper", startSeatKeeper)
             if SCENARIO == "channel" and tick >= 24 then step("chantest", queueChannelTest) end
@@ -1648,7 +1781,6 @@ LoopInGameThreadWithDelay(5000, function()
         end
         if ROLE == "client" and gameplay then
             step("dedupe", dedupeCar)
-            step("bodies", revealOtherBodies)
             if SCENARIO == "loot" then step("loottest", clientLootTestTick) end
             step("seathook", registerSeatHook)
             local bound = false
@@ -1660,6 +1792,7 @@ LoopInGameThreadWithDelay(5000, function()
             if bound then step("ride", clientCarTick) end
         end
         step("status", status)
+        if gameplay then step("bodystate", logBodyStates) end
         -- the nudge teleports the host pawn, so stop it once the host is getting into the car
         if BOTS and ROLE == "host" and gameplay and drive.phase == "wait" then step("nudge", nudgeHostPawn) end
     end

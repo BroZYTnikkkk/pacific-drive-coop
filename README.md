@@ -20,7 +20,9 @@ listen-server netcode and driven by a [UE4SS](https://github.com/UE4SS-RE/RE-UE4
 | The game's own map change (e.g. new game, quit to menu): host re-hosts the new map, the client reconnects and spawns next to the host | `gametravel` | 15/15 (2 n/a) |
 | Start of a new game (player starts seated in the intro car): one car on the client, player 2 seated as passenger, not on top of the host | `gametravel` | 15/15 |
 | Test runs report game crashes (crash reporters are closed, dumps kept) | all | yes |
-| Shared world items: player 2 sees the host's items in the same places, picks them up into their own inventory, the host's copy disappears; the host's pickups disappear for player 2 | `loot` | 21/21 |
+| Shared world items: player 2 sees the host's items in the same places, picks them up into their own inventory, the host's copy disappears; the host's pickups disappear for player 2 | `loot` | 25/25 |
+| Visible bodies: each player sees the other player's body (on foot and seated), never their own; the driver's body is not hidden for the passenger | `rejoincar`, `loot` | 33/33, 25/25 |
+| Seated bodies are lowered into the seat and do not collide with the car; the passenger's camera mirrors the driver's | `rejoincar` | pass |
 
 A joining or re-joining player always appears next to what the host controls right now (the host's character,
 or the car, in which case they are seated as a passenger). Saved positions and the garage are never used.
@@ -34,7 +36,10 @@ or the car, in which case they are seated as a passenger). Saved positions and t
   loads, the mod could mistake the pump taking its handle for a pickup and remove the host's handle.
 - The game's own map changes drop the listen server; the mod re-hosts by loading the map a second time
   (+15-30 s per map change), and clients reconnect (retry every 30 s).
-- The passenger does not play a sitting animation; camera and visuals were not checked by a human.
+- Bodies are the game's stock mannequin (the player character is a first-person invisible mesh) with Unreal's
+  grey default material. There is no sitting pose: a seated player is a standing mannequin lowered into the
+  seat. Held items, the flashlight and animations other than walking are not mirrored (not implemented).
+- The screen effects of damage (red/brown blood overlay) are the game's own and not synced.
 - Internet play was not tested (only localhost). The mod uses Unreal's IP net driver: the host must be
   reachable on UDP port 7777 (port forward, or a LAN/VPN such as Tailscale/ZeroTier).
 - The play keys (F6/F7/F8 below) were not pressed in any test. The tests run the same actions from bots
@@ -77,7 +82,8 @@ powershell -File tools/run_test.ps1 -Root C:\PDCoop -Name mytest -Seconds 300 -S
 `-Root` must contain `client1` and `client2`, two copies of the game with UE4SS installed (the second can be
 hardlinks to the first, with its own `PenDriverPro/Binaries/Win64`). Both are started with `-NotInstalled`, so
 each copy keeps its settings, logs and saves in its own `PenDriverPro/Saved` instead of `%LOCALAPPDATA%`.
-Scenarios: `car`, `rejoincar`, `travel`, `gametravel` (bots do the driving, walking and travelling).
+Scenarios: `car`, `rejoincar`, `travel`, `gametravel`, `loot` (bots do the driving, walking, travelling and
+looting). `tools/run_single.ps1` runs one copy for quick probes.
 `tools/paklist.py` and `tools/pakextract.py` list and extract files from the game's own pak v11 archives
 (unencrypted, Zlib) for research; never redistribute extracted files.
 

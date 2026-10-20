@@ -9,6 +9,10 @@ Do not install `PDCoopDev` for normal play: it has cheats and runs Lua sent thro
 | `dev_session.ps1` | starts one or two test copies (host + client on 127.0.0.1) with the co-op mod and PDCoopDev, leaves them running |
 | `dev.ps1` | sends one command to a running copy and prints the answer |
 | `test_carsync.ps1` | automated test of the shared trunk, car part state and player 2's saved inventory, driven through `dev.ps1` |
+| `test_itemstate.ps1` | items keep fuel / durability through the trunk, the world, pickups and the saved inventory; 50 % fallback; clamp |
+| `test_refuel.ps1` | player 2 refuels (TransferFuel) and charges (DoCharge) the car, the host's car gets it |
+| `test_downed.ps1` | down instead of dead, revive both ways (with / without food), team death after 60 s, player 2's losses, tombstone (zone map, `-ResetSave`) |
+| `testlib.ps1` | helpers shared by the tests |
 
 ```
 powershell -File dev/dev_session.ps1 -Two          # client1 hosts RB_Garage, client2 joins
@@ -30,6 +34,10 @@ main README). The copies run with `-NotInstalled`, so they never touch your own 
 | `spawn <item> [n]` | spawns world items in front of you |
 | `items <filter>` | lists item archetypes |
 | `god [on\|off]`, `heal`, `hurt [n]` | player health (the `PlayerHealth` resource of `BP_ResourceManager_C`) |
+| `lethal [n]` | n hits of 500 through the game's own player damage path (zone only: the garage protects the player) |
+| `holdrevive on\|off` | the co-op mod treats the revive key (E) as held (shared UE4SS variable) |
+| `setstate <container> <slot> <state>`, `wstate [filter]`, `wsetstate <filter> <state>` | item state (`F6.5_D3`: fuel, battery, durability, health) in a container slot / of world items |
+| `pickup <filter>` | picks up the nearest matching world item with the game's own pickup |
 | `car`, `carfix`, `carhurt [pct]` | car parts' health, fuel, battery; repair/refuel/charge; damage all parts to pct % |
 | `tp x y z`, `tpcar`, `carhere` | teleports |
 | `find <class> [filter]`, `props <class\|name> [filter]`, `funcs <class\|name> [filter]` | reflection: live objects, property values, functions |
@@ -37,6 +45,11 @@ main README). The copies run with `-NotInstalled`, so they never touch your own 
 | `lua <code>`, `luafile <path>` | runs Lua in the game thread; the helpers (`me()`, `car()`, `im()`, `find()`, `props()`, `arch()`, `carParts()`, `res()`...) are in scope, the result is printed |
 
 Keys in the game window: Ctrl+F9 god mode, Ctrl+F10 repair/refuel/charge the car, Ctrl+F11 state into the UE4SS log.
+
+`dev_session.ps1 -Map <map> -ResetSave`: zone tests need a host save from before any team death (after one, a
+zone opened directly takes no damage); `-ResetSave` copies `<root>\saves-baseline\odsave_scratch.sav` over the
+host copy's save. With `-Two` the client starts once the host listens. From Git Bash, prefix the call with
+`MSYS_NO_PATHCONV=1`, or `/Game/...` arguments are rewritten into Windows paths.
 
 `PDCoopDev/dev.txt` (written by `dev_session.ps1`, removed by `-Stop` and by `tools/run_test.ps1`):
 `open <map or address>` opens it once the main menu is up, `god` starts with god mode on.

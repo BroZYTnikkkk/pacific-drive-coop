@@ -11,7 +11,10 @@ param(
     [string]$Name = "devsession",
     [string]$Root = "C:\PDCoop",
     [string]$ModSource = "",
-    [string]$Scenario = "play"
+    [string]$Scenario = "play",
+    # copy <root>\saves-baseline\odsave_scratch.sav over the host copy's save first (zone tests need a save from
+    # before any team death: after one, a zone opened directly takes no damage)
+    [switch]$ResetSave
 )
 $bin = "PenDriverPro\Binaries\Win64"
 $repo = Split-Path $PSScriptRoot
@@ -64,9 +67,22 @@ foreach ($c in $clients) {
     Set-Content -Encoding ascii "$mods\PDCoopDev\dev.txt" $dev
     Remove-Item (Join-Path $Root "$c\$bin\ue4ss\UE4SS.log") -ErrorAction SilentlyContinue
 }
+if ($ResetSave) {
+    $base = Join-Path $Root "saves-baseline\odsave_scratch.sav"
+    if (Test-Path $base) { Copy-Item $base (Join-Path $Root "client1\PenDriverPro\Saved\SaveGames\odsave_scratch.sav") -Force }
+    else { Write-Output "no baseline save at $base" }
+}
 foreach ($c in $clients) {
     $exe = Join-Path $Root "$c\$bin\PenDriverPro-Win64-Shipping.exe"
     Start-Process $exe -ArgumentList "-NotInstalled", "-windowed", "-ResX=960", "-ResY=540", "-log" -WorkingDirectory (Split-Path $exe) | Out-Null
-    if ($c -eq "client1" -and $Two) { Start-Sleep 25 }
+    if ($c -eq "client1" -and $Two) {
+        # the client connects once: wait until the host really listens (a zone loads much longer than the garage)
+        $deadline = (Get-Date).AddSeconds(300)
+        do {
+            Start-Sleep 5
+            $st = (& powershell -NoProfile -File "$PSScriptRoot\dev.ps1" -Client client1 -Root $Root -TimeoutSec 10 state) -join "`n"
+        } while ($st -notmatch "net: host" -and (Get-Date) -lt $deadline)
+        Start-Sleep 5
+    }
 }
 Write-Output "started: $($clients -join ', ') (map $Map). Use dev/dev.ps1 <command>; dev/dev_session.ps1 -Stop to end."

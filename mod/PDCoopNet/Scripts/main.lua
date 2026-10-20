@@ -26,6 +26,23 @@ local function readRole()
 end
 
 local ROLE, ARG, SCENARIO = readRole()
+
+-- Feature switches: ue4ss/Mods/PDCoopNet/features.txt, one "<name> = on|off" per line; missing = on.
+-- itemstate (item fuel/charge/durability/health over the network), trunk (shared trunk), carstate (car part
+-- health/fuel/battery follow the host), refuel (player 2's refuel/charge reach the host), invsave (player 2's
+-- inventory saved on the host), downed (down instead of dead, revive, team death).
+local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true }
+do
+    local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
+    if f then
+        for line in f:lines() do
+            local k, v = line:match("^%s*([%w_]+)%s*=%s*(%a+)")
+            if k and FEATURES[k] ~= nil then FEATURES[k] = (v:lower() == "on" or v:lower() == "true" or v == "1") end
+        end
+        f:close()
+    end
+end
+local function feature(name) return FEATURES[name] == true end
 local CAR_LIKE = (SCENARIO == "car" or SCENARIO == "rejoincar")
 local BOTS = (SCENARIO ~= "play")       -- test bots: auto-open/connect, walking, nudges, the bot driver
 local droppedOnce = false   -- rejoincar: the client disconnects itself once while riding
@@ -552,6 +569,15 @@ local function hostSend(payload)
     table.insert(hostOut.queue, payload)
 end
 
+-- a message that replaces a queued one of the same kind (full-state messages: only the newest matters)
+local function hostSendLatest(payload)
+    local kind = payload:match("^([^|]+)|")
+    for i, q in ipairs(hostOut.queue) do
+        if q:match("^([^|]+)|") == kind then hostOut.queue[i] = payload; return end
+    end
+    hostSend(payload)
+end
+
 local function cmdAcksText()
     local parts = {}
     for pid, seq in pairs(lastCmdSeq) do table.insert(parts, pid .. "=" .. seq) end
@@ -673,13 +699,39 @@ local function archLoad(short)
     return archCache[path] or nil
 end
 
+-- item state (fuel, charge, durability, health) carried with items (itemstate.lua)
+local ItemState = require("itemstate")({ log = log, valid = valid, feature = feature })
+
 -- shared trunk, car part state, player 2's inventory saved on the host (carsync.lua)
 local CarSync = require("carsync")({
+    ItemState = ItemState, feature = feature,
     log = log, valid = valid, UEHelpers = UEHelpers, objName = objName, CHAN_MAX = CHAN_MAX,
     hostSend = function(payload) hostSend(payload) end,
+    hostSendLatest = function(payload) hostSendLatest(payload) end,
     sendCommand = function(cmd) sendCommand(cmd) end,
     hostMsgHandlers = hostMsgHandlers, archShort = archShort, archLoad = archLoad,
     playerCar = function() return playerCar() end,
+})
+
+-- down instead of dead, revive, team death (downed.lua)
+local Downed = require("downed")({
+    log = log, valid = valid, UEHelpers = UEHelpers,
+    enabled = function() return feature("downed") end,
+    role = function() return ROLE end,
+    localController = function() return localController() end,
+    myPlayerId = function() return myPlayerId() end,
+    sendCommand = function(cmd) sendCommand(cmd) end,
+    hostSend = function(payload) hostSend(payload) end,
+    hostSendLatest = function(payload) hostSendLatest(payload) end,
+    hostMsgHandlers = hostMsgHandlers,
+    keyOf = function(inst) return CarSync.keyOf(inst) end,
+    addEntries = function(cont, text) return CarSync.addEntries(cont, text) end,
+    clientsPresent = function()
+        for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+            if valid(pc) and not pc:IsLocalController() then return true end
+        end
+        return false
+    end,
 })
 
 -- the world items of this machine: list of { actor, id, arch, x, y, z, p, yw, r }
@@ -701,6 +753,7 @@ local function scanWorldItems()
                 return { actor = a, id = a:GetFName():ToString() .. "#" .. inst:GetFName():ToString(),
                          -- UE4SS objects have no GetPathName (exp37: every item was skipped); take it from the full name
                          arch = archShort(inst.Archetype:GetFullName():match("%s(%S+)$")),
+                         state = ItemState.read(inst),
                          x = l.X, y = l.Y, z = l.Z, p = r.Pitch, yw = r.Yaw, r = r.Roll }
             end)
             if ok and e then table.insert(out, e) end
@@ -750,12 +803,17 @@ local function hostItemsTick()
         now[e.id] = e
         local k = hostKnown[e.id]
         if not k then
-            table.insert(ops, "A," .. e.id .. "," .. e.arch .. "," .. fmtXf(e))
-        elseif math.abs(k.x - e.x) + math.abs(k.y - e.y) + math.abs(k.z - e.z) > 20 then
-            table.insert(ops, "M," .. e.id .. "," .. fmtXf(e))
+            table.insert(ops, "A," .. e.id .. "," .. e.arch .. "," .. fmtXf(e) .. "," .. e.state)
         else
-            e = k   -- keep the sent position as the reference
-            now[e.id] = k
+            if (k.state or "") ~= e.state then table.insert(ops, "S," .. e.id .. "," .. e.state) end
+            if math.abs(k.x - e.x) + math.abs(k.y - e.y) + math.abs(k.z - e.z) > 20 then
+                table.insert(ops, "M," .. e.id .. "," .. fmtXf(e))
+            else
+                -- keep the sent position as the reference
+                k.state = e.state
+                k.actor = e.actor
+                now[e.id] = k
+            end
         end
     end
     for id in pairs(hostKnown) do
@@ -778,14 +836,15 @@ local function hostItemCommand(kind, args, pc)
             log("ITEMSYNC PICKUP by %s: host item %s not found", objName(pc), args)
         end
     elseif kind == "DROP" then
-        local arch, x, y, z, pi, yw, r = args:match("^([^,]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+)$")
+        local arch, x, y, z, pi, yw, r, st = args:match("^([^,]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+),(-?[%d.]+),?([%w_.%-]*)$")
         local a = arch and archLoad(arch)
         local inv = FindFirstOf("InventorySystem")
         if a and valid(inv) then
             local xf = UEHelpers.GetKismetMathLibrary():MakeTransform({ X = tonumber(x), Y = tonumber(y), Z = tonumber(z) },
                 { Pitch = tonumber(pi), Yaw = tonumber(yw), Roll = tonumber(r) }, { X = 1, Y = 1, Z = 1 })
             local ok, act = pcall(function() return inv:SpawnItemActor(UEHelpers.GetWorldContextObject(), xf, a, 0, 0) end)
-            log("ITEMSYNC DROP by %s: spawned %s on the host ok=%s %s", objName(pc), arch, tostring(ok), ok and objName(act) or tostring(act))
+            if ok and valid(act) and st and st ~= "" then ItemState.write(act.Instance, st, arch) end
+            log("ITEMSYNC DROP by %s: spawned %s (%s) on the host ok=%s %s", objName(pc), arch, st or "", tostring(ok), ok and objName(act) or tostring(act))
         else
             log("ITEMSYNC DROP by %s: cannot spawn %s", objName(pc), tostring(arch))
         end
@@ -804,13 +863,14 @@ local function mirrorRemove(id)
     if valid(m.actor) then pcall(function() m.actor.Instance:Remove(true) end) end
 end
 
-local function mirrorSpawn(id, arch, x, y, z, pi, yw, r)
+local function mirrorSpawn(id, arch, x, y, z, pi, yw, r, st)
     local a = archLoad(arch)
     local inv = FindFirstOf("InventorySystem")
     if not (a and valid(inv)) then log("ITEMSYNC cannot mirror %s (%s)", id, arch); return end
     local xf = UEHelpers.GetKismetMathLibrary():MakeTransform({ X = x, Y = y, Z = z }, { Pitch = pi, Yaw = yw, Roll = r }, { X = 1, Y = 1, Z = 1 })
     local act = inv:SpawnItemActor(UEHelpers.GetWorldContextObject(), xf, a, 0, 0)
     if valid(act) then
+        if st and st ~= "" then ItemState.write(act.Instance, st, arch) end
         local name = act:GetFullName()
         mirror[id] = { actor = act, actorName = name, inst = act.Instance:GetFullName(), born = fastTick, x = x, y = y, z = z }
         mirrorByActor[name] = id
@@ -829,12 +889,16 @@ hostMsgHandlers["ITEMS"] = function(rest)
     for op in rest:gmatch("[^;]+") do
         local kind = op:sub(1, 1)
         if kind == "A" then
-            local id, arch, x, y, z, pi, yw, r = op:match("^A,([^,]+),([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+)$")
+            local id, arch, x, y, z, pi, yw, r, st = op:match("^A,([^,]+),([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),?([%w_.%-]*)$")
             if id then
                 mirrorRemove(id)
-                mirrorSpawn(id, arch, tonumber(x), tonumber(y), tonumber(z), tonumber(pi), tonumber(yw), tonumber(r))
+                mirrorSpawn(id, arch, tonumber(x), tonumber(y), tonumber(z), tonumber(pi), tonumber(yw), tonumber(r), st)
                 adds = adds + 1
             end
+        elseif kind == "S" then
+            local id, st = op:match("^S,([^,]+),([%w_.%-]*)$")
+            local m = id and mirror[id]
+            if m and valid(m.actor) then ItemState.write(m.actor.Instance, st, id) end
         elseif kind == "M" then
             local id, x, y, z, pi, yw, r = op:match("^M,([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+)$")
             local m = id and mirror[id]
@@ -900,7 +964,7 @@ local function clientItemsTick()
         if not mirrorByActor[name] then
             local near = myLoc and (math.abs(e.x - myLoc.X) + math.abs(e.y - myLoc.Y) < 400)
             if near and fastTick - itemsArrived > 50 then
-                sendCommand("DROP," .. e.arch .. "," .. fmtXf(e))
+                sendCommand("DROP," .. e.arch .. "," .. fmtXf(e) .. "," .. e.state)
                 dropped = dropped + 1
             else
                 purged = purged + 1
@@ -957,7 +1021,9 @@ local function hostCommandsTick()
         if valid(car) and kind == "SEAT" then seatPassenger(rc.pc, car)
         elseif valid(car) and kind == "UNSEAT" then unseatPassenger(rc.pc, car)
         elseif kind == "PICKUP" or kind == "DROP" then hostItemCommand(kind, args, rc.pc)
-        elseif not CarSync.hostCommand(kind, args, rc.pc) then log("CMD unknown %s", tostring(kind)) end
+        elseif not CarSync.hostCommand(kind, args, rc.pc) and not Downed.hostCommand(kind, args, rc.pc) then
+            log("CMD unknown %s", tostring(kind))
+        end
     end
 end
 
@@ -1500,6 +1566,7 @@ local function resetPerMapState(newWorld)
     if rideLoop then pcall(CancelDelayedAction, rideLoop); rideLoop = nil end
     gmLogged = false
     mapTicks = 0
+    pcall(Downed.mapChanged, newWorld)
 end
 
 local function hookLogger(path)
@@ -1672,7 +1739,17 @@ end
 if BOTS and ROLE == "host" then
     ExecuteInGameThreadWithDelay(40000, function() console("open " .. (ARG or "/Game/Maps/RunProto/RB_Garage") .. "?listen") end)
 elseif BOTS and ROLE == "client" then
-    ExecuteInGameThreadWithDelay(90000, function() console("open " .. (ARG or "127.0.0.1:7777")) end)
+    ExecuteInGameThreadWithDelay(90000, function()
+        console("open " .. (ARG or "127.0.0.1:7777"))
+        -- the host may still be loading (exp80: the garage took 2 min with a bigger save): keep trying
+        ExecuteInGameThreadWithDelay(45000, function()
+            local w = UEHelpers.GetWorld()
+            if valid(w) and w:GetFullName():find("RB_MainMenu", 1, true) and not rejoin.active then
+                log("REJOIN first connect failed, will keep reconnecting")
+                rejoin.active, rejoin.next = true, 1
+            end
+        end)
+    end)
 end
 
 -- keys (all scenarios; they are what a player uses in "play")
@@ -1712,6 +1789,14 @@ LoopInGameThreadWithDelay(200, function()
     do  -- every 200 ms: a new body gets its material within one tick (exp49: one sample before the 1 s update)
         local okB, errB = pcall(updateBodies)
         if not okB then log("bodies error: %s", tostring(errB)) end
+        if ROLE == "host" or ROLE == "client" then
+            local okD, errD = pcall(Downed.tick, 0.2)
+            if not okD then log("downed error: %s", tostring(errD)) end
+            if ROLE == "host" and fastTick % 5 == 1 then
+                okD, errD = pcall(Downed.hostAfterDeathTick)
+                if not okD then log("downed error: %s", tostring(errD)) end
+            end
+        end
     end
     if ROLE == "host" then
         local ok, err = pcall(hostCommandsTick)

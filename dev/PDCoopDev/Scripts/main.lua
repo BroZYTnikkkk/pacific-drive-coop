@@ -7,6 +7,7 @@
 --    Commands: help, state, inv [all|player|hand|trunk|<container field>], give <item> [n] [trunk], spawn <item> [n],
 --    items <filter>, find <class> [filter], props <class|name> [filter], funcs <class|name> [filter],
 --    god [on|off], heal, hurt [n], car, carfix (repair/refuel/charge), carhurt [pct], tp <x> <y> <z>, tpcar, carhere,
+--    setstate <container> <slot> <state>, wstate [filter], wsetstate <filter> <state>, pickup <filter>,
 --    shot, con <console command>, luafile <path>,
 --    lua <code> (multi-line; helpers below are in scope, p(...) prints into the output, the return value is printed).
 -- 2) Keys (game window focused): Ctrl+F9 god mode on/off, Ctrl+F10 car: refuel/charge/repair, Ctrl+F11 state into
@@ -229,6 +230,17 @@ function H.containers()
     return r
 end
 -- { {slot=i, arch=name, n=count} ... } for a container
+-- the co-op mod's item state module (same code as in the mod): fuel, battery, durability, health of instances
+local IS = nil
+function H.IS()
+    if IS then return IS end
+    local ok, mod = pcall(dofile, "ue4ss/Mods/PDCoopNet/Scripts/itemstate.lua")
+    if ok and type(mod) == "function" then IS = mod({ log = function(fmt, ...) print("[PDCoopDev] " .. string.format(fmt, ...) .. "\n") end, valid = valid }) end
+    return IS
+end
+function H.stateOf(inst) local m = H.IS(); return m and m.read(inst) or "?" end
+
+-- { {slot=i, arch=name, n=count, items={instances}, state=state of the first item} ... } for a container
 function H.listContainer(cont)
     local r = {}
     if not valid(cont) then return r end
@@ -239,8 +251,10 @@ function H.listContainer(cont)
         local n, arch = 0, nil
         pcall(function() n = slot.Items:GetArrayNum() end)
         if n > 0 then
-            pcall(function() arch = slot.Items[1].Archetype:GetFName():ToString() end)
-            r[#r + 1] = { slot = i, arch = arch or "?", n = n }
+            local items = {}
+            pcall(function() slot.Items:ForEach(function(_, it) items[#items + 1] = it:get() end) end)
+            pcall(function() arch = items[1].Archetype:GetFName():ToString() end)
+            r[#r + 1] = { slot = i, arch = arch or "?", n = n, items = items, state = H.stateOf(items[1]) }
         end
     end) end)
     return r, i
@@ -422,15 +436,16 @@ local function stateText()
         local parts = H.carParts(car)
         local hurt = 0
         for _, e in ipairs(parts) do if type(e.hp) == "number" and type(e.max) == "number" and e.hp < e.max then hurt = hurt + 1 end end
+        -- totals without the pass-throughs (gas cap = sum of the tanks, charge port = charger input)
         local fuel, cap = 0, 0
         for _, c in ipairs(H.carComps("BP_FuelableComponent_C", car)) do
             local f, m = H.fuelOf(c)
-            if type(f) == "number" and type(m) == "number" then fuel, cap = fuel + f, cap + m end
+            if type(f) == "number" and type(m) == "number" and not H.cls(H.ownerOf(c)):find("GasCap", 1, true) then fuel, cap = fuel + f, cap + m end
         end
         local bat, bcap = 0, 0
         for _, c in ipairs(H.carComps("BP_BatteryComponent_C", car)) do
             local b2, m = H.batteryOf(c)
-            if type(b2) == "number" and type(m) == "number" then bat, bcap = bat + b2, bcap + m end
+            if type(b2) == "number" and type(m) == "number" and not H.cls(H.ownerOf(c)):find("ChargePort", 1, true) then bat, bcap = bat + b2, bcap + m end
         end
         lines[#lines + 1] = string.format("  parts with health: %d, damaged: %d; fuel %.1f / %.1f; battery %.1f / %.1f",
             #parts, hurt, fuel, cap, bat, bcap)
@@ -479,7 +494,9 @@ local function invText(word)
         local items, slots = H.listContainer(conts[n])
         if #items > 0 or word ~= "all" then
             out[#out + 1] = string.format("%s (%s, %d slots):", n, H.name(conts[n]), slots or 0)
-            for _, e in ipairs(items) do out[#out + 1] = string.format("  [%d] %s x%d", e.slot, e.arch, e.n) end
+            for _, e in ipairs(items) do
+                out[#out + 1] = string.format("  [%d] %s x%d%s", e.slot, e.arch, e.n, (e.state and e.state ~= "") and (" {" .. e.state .. "}") or "")
+            end
         end
     end
     return #out > 0 and table.concat(out, "\n") or "all containers empty"
@@ -533,7 +550,7 @@ end
 local function joinLines(t) return type(t) == "table" and table.concat(t, "\n") or tostring(t) end
 
 local commands = {}
-commands.help = function() return "help state inv give spawn items find props funcs god heal hurt car carfix carhurt fuel tp tpcar carhere shot con lua luafile" end
+commands.help = function() return "help state inv give spawn items find props funcs god heal hurt car carfix carhurt fuel setstate wstate wsetstate pickup tp tpcar carhere shot con lua luafile" end
 commands.state = function() return stateText() end
 commands.inv = function(a) return invText(a[1]) end
 commands.give = function(a) return give(a[1], a[2], a[3]) end
@@ -567,6 +584,80 @@ commands.god = function(a)
     return "god " .. tostring(god)
 end
 commands.heal = function() return heal() end
+-- holdrevive on|off: the co-op mod treats the revive key as held (automated revive tests)
+commands.holdrevive = function(a)
+    local v = a[1] ~= "off"
+    ModRef:SetSharedVariable("PDCoopDev_HoldRevive", v)
+    return "holdrevive " .. tostring(v)
+end
+-- lethal [n]: n lethal hits through the game's player damage path (AC_PlayerHealthReceiverHelper)
+commands.lethal = function(a)
+    local cls_ = StaticFindObject("/Game/Systems/Messages/MSG_Damage_Physical.MSG_Damage_Physical_C")
+        or LoadAsset("/Game/Systems/Messages/MSG_Damage_Physical.MSG_Damage_Physical_C")
+    local me = H.me()
+    if not (valid(me) and cls_) then return "no character or damage class" end
+    local rc = me.AC_PlayerHealthReceiverHelper
+    local out = {}
+    for _ = 1, tonumber(a[1]) or 2 do
+        local m = StaticConstructObject(cls_, H.invsys())
+        m.Damage = 500
+        local h0 = H.res("PlayerHealth").Current
+        pcall(function() rc:MessageBind_MSG_Base_Damage_C(m, me, me) end)
+        out[#out + 1] = string.format("%.1f->%.1f", h0, H.res("PlayerHealth").Current)
+    end
+    return "lethal hits: " .. table.concat(out, " ") .. " alive=" .. tostring(H.cm().bIsAlive)
+end
+-- setstate <container> <slot> <state>: write the state of the first item of a slot (itemstate rules, e.g. F6.5_D3)
+commands.setstate = function(a)
+    local cont = containerByWord(a[1] or "")
+    if not cont then return "unknown container " .. tostring(a[1]) end
+    local items = H.listContainer(cont)
+    for _, e in ipairs(items) do
+        if e.slot == tonumber(a[2]) then
+            local res, notes = H.IS().write(e.items[1], a[3] or "", e.arch)
+            return string.format("%s slot %d: %s %s -> %s", e.arch, e.slot, res, notes or "", H.stateOf(e.items[1]))
+        end
+    end
+    return "no item in slot " .. tostring(a[2])
+end
+-- wstate [filter]: world items with their state; wsetstate <filter> <state>: set the state of the first match
+local function worldItems(filter)
+    local r = {}
+    for _, x in ipairs(H.find("ItemWorldManifestation")) do
+        local okA, an = pcall(function() return x.Instance.Archetype:GetFName():ToString() end)
+        local okC, ctx = pcall(function() return x:K2_GetActorContext() end)
+        if okA and okC and ctx == 0 and (not filter or an:lower():find(filter:lower(), 1, true)) then r[#r + 1] = { actor = x, arch = an } end
+    end
+    return r
+end
+commands.wstate = function(a)
+    local out = {}
+    for _, e in ipairs(worldItems(a[1])) do
+        out[#out + 1] = string.format("%s %s at %s {%s}", H.name(e.actor), e.arch, H.loc(e.actor), H.stateOf(e.actor.Instance))
+    end
+    return string.format("%d world item(s)\n%s", #out, table.concat(out, "\n"))
+end
+commands.wsetstate = function(a)
+    local e = worldItems(a[1])[1]
+    if not e then return "no world item matching " .. tostring(a[1]) end
+    local res, notes = H.IS().write(e.actor.Instance, a[2] or "", e.arch)
+    return string.format("%s: %s %s -> %s", e.arch, res, notes or "", H.stateOf(e.actor.Instance))
+end
+-- pickup <filter>: this player picks up the nearest world item matching filter (the game's own pickup)
+commands.pickup = function(a)
+    local me = H.me()
+    if not valid(me) then return "no character" end
+    local l = me:K2_GetActorLocation()
+    local best, bd = nil, 1e18
+    for _, e in ipairs(worldItems(a[1])) do
+        local p = e.actor:K2_GetActorLocation()
+        local d = (p.X - l.X) ^ 2 + (p.Y - l.Y) ^ 2 + (p.Z - l.Z) ^ 2
+        if d < bd then best, bd = e, d end
+    end
+    if not best then return "nothing to pick up" end
+    local ok, err = pcall(function() me["Pickup Actor"](me, best.actor, false) end)
+    return string.format("pickup %s (%.0f uu) ok=%s %s", best.arch, math.sqrt(bd), tostring(ok), ok and "" or tostring(err))
+end
 commands.hurt = function(a) return hurt(a[1]) end
 commands.car = function() return carText() end
 commands.carhurt = function(a) return carHurt(a[1]) end

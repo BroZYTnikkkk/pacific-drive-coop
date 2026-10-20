@@ -6,7 +6,7 @@ param(
     [Parameter(Mandatory = $true, Position = 0)][string]$Command,
     [string]$Client = "client1",
     [string]$Root = "C:\PDCoop",
-    [int]$TimeoutSec = 15
+    [int]$TimeoutSec = 40
 )
 $dir = Join-Path $Root "$Client\PenDriverPro\Binaries\Win64\ue4ss\Mods\PDCoopDev"
 if (-not (Test-Path $dir)) { Write-Output "PDCoopDev is not installed in $Client"; exit 2 }

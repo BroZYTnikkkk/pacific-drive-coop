@@ -9,14 +9,21 @@
 --   car:    host sends "CARST|<key>=<value>;..." (part health "H", fuel "F", battery "B"); a client sets its local
 --           parts to these values and keeps them there (local damage on the client is overwritten). A repair made
 --           on the client (part health went up) is sent to the host as "CARUP,<key>=<value>;...". Fuel and battery
---           come only from the host (a refuel or charge done by player 2 is lost; see the notes).
+--           follow the host; only player 2's own actions count: the game's TransferFuel (fuel can, pump handle,
+--           siphon) and DoCharge (battery charger tool) are hooked on the client. In a second in which such a call
+--           touched the car, the actual change of every fuel (or battery) value of the car is sent as
+--           "CARADD,<key>=<+/-amount>;..." (the gas cap passes fuel on to the tank, so the amount the call reports
+--           is not what the car got). Background changes (garage charger, consumption) are computed by the host.
 --   inventory of player 2: the client has a random id (player_id.txt next to role.txt), says "HELLO,<id>" to every
 --           new host session and sends "INVSAVE,<id>!<container>=<items>!..." when its inventory changes; the
 --           host writes ue4ss/Mods/PDCoopNet/save_<id>.txt and sends "INVLOAD|<id>|..." back when that player
 --           joins again; the client then replaces its inventory with the saved one.
--- Item state (durability, fuel in a can, charge) is not carried: items are recreated from their archetype.
+-- Items carry their state (fuel, charge, durability, health; itemstate.lua): an entry key is "<arch>" or
+-- "<arch>@<state>", so two cans with different fuel are different keys.
 return function(ctx)
     local log, valid, UEHelpers = ctx.log, ctx.valid, ctx.UEHelpers
+    local IS = ctx.ItemState
+    local on = ctx.feature      -- on("trunk"), on("carstate"), on("refuel"), on("invsave")
     local M = {}
     local DIR = "ue4ss/Mods/PDCoopNet/"
     local PLAYER_CONTAINERS = { "Inventory_Player", "Inventory_PlayerHand" }
@@ -35,19 +42,47 @@ return function(ctx)
         if not valid(a) then return nil end
         return ctx.archShort(a:GetFullName():match("%s(%S+)$"))
     end
-    -- entries in slot order: { {arch, n}, ... } (one per non-empty slot)
+    local function keyOf(inst)
+        local arch = archOfInstance(inst)
+        if not arch then return nil end
+        local st = IS.read(inst)
+        return st ~= "" and (arch .. "@" .. st) or arch
+    end
+    local function splitKey(key)
+        local arch, st = key:match("^([^@]+)@?(.*)$")
+        return arch, st or ""
+    end
+    -- calls fn(instance) for every item of the container
+    local function eachItem(cont, fn)
+        pcall(function()
+            cont.Slots:ForEach(function(_, e)
+                local slot = e:get()
+                pcall(function()
+                    slot.Items:ForEach(function(_, it)
+                        local inst = it:get()
+                        if valid(inst) then fn(inst) end
+                    end)
+                end)
+            end)
+        end)
+    end
+    -- entries in slot order: { {key, n}, ... } (items of one slot with the same key are one entry)
     local function containerEntries(cont)
         local out = {}
         if not valid(cont) then return out end
         pcall(function()
             cont.Slots:ForEach(function(_, e)
                 local slot = e:get()
-                local n, arch = 0, nil
-                pcall(function() n = slot.Items:GetArrayNum() end)
-                if n > 0 then
-                    pcall(function() arch = archOfInstance(slot.Items[1]) end)
-                    if arch then out[#out + 1] = { arch, n } end
-                end
+                local last = nil
+                pcall(function()
+                    slot.Items:ForEach(function(_, it)
+                        local key = keyOf(it:get())
+                        if key then
+                            if last and last[1] == key then last[2] = last[2] + 1
+                            else last = { key, 1 }; out[#out + 1] = last end
+                        end
+                    end)
+                end)
             end)
         end)
         return out
@@ -78,7 +113,8 @@ return function(ctx)
         end
         return any and d or nil
     end
-    local function addItems(cont, arch, n)
+    local function addItems(cont, key, n)
+        local arch, st = splitKey(key)
         local a = ctx.archLoad(arch)
         if not a then log("CARSYNC cannot load %s", arch); return 0 end
         local wco = UEHelpers.GetWorldContextObject()
@@ -86,23 +122,46 @@ return function(ctx)
         for _ = 1, n do
             local ok = pcall(function()
                 local inst = a:CreateInstance(wco, 0)
+                if st ~= "" or IS.isStateful(inst) then IS.write(inst, st, arch) end
                 cont:AddItem(inst, true)
             end)
             if ok then added = added + 1 end
         end
         return added
     end
-    local function removeItems(cont, arch, n)
-        local a = ctx.archLoad(arch)
-        if not a then return 0 end
-        local before = countsOf(containerEntries(cont))[arch] or 0
-        pcall(function() cont:RemoveItemsOfType(a, n) end)
-        local after = countsOf(containerEntries(cont))[arch] or 0
-        return before - after
+    -- removes n items with this key; if fewer match exactly, items of the same type with another state
+    -- (the state changed on the host meanwhile) are taken instead
+    local function removeItems(cont, key, n)
+        local arch = splitKey(key)
+        local exact, other = {}, {}
+        eachItem(cont, function(inst)
+            if archOfInstance(inst) == arch then
+                if keyOf(inst) == key then exact[#exact + 1] = inst else other[#other + 1] = inst end
+            end
+        end)
+        local removed = 0
+        for _, list in ipairs({ exact, other }) do
+            for _, inst in ipairs(list) do
+                if removed >= n then break end
+                if pcall(function() cont:RemoveItem(inst) end) then removed = removed + 1 end
+            end
+        end
+        if #exact < n and removed > #exact then
+            log("CARSYNC removed %d %s with another state than %s", removed - #exact, arch, key)
+        end
+        return removed
     end
     local function rebuild(cont, entries)
         pcall(function() cont:RemoveAllItems() end)
         for _, e in ipairs(entries) do addItems(cont, e[1], e[2]) end
+    end
+
+    M.keyOf = function(inst) return keyOf(inst) end
+    -- adds "<key>*<n>;..." to a container; returns the number of items added
+    M.addEntries = function(cont, text)
+        local n = 0
+        for _, e in ipairs(parseEntries(text)) do n = n + addItems(cont, e[1], e[2]) end
+        return n
     end
 
     -- ------------------------------------------------------------ car parts
@@ -128,8 +187,9 @@ return function(ctx)
                 local o = nil
                 pcall(function() o = c:GetOwner() end)
                 -- the charge port's battery component is a pass-through of the charger, not a battery
+                -- (classes only after the validity checks: GetClass on a dead object crashed the host, exp67)
                 if valid(c) and valid(o) and top(o):GetFullName() == carName
-                    and not c:GetClass():GetFName():ToString():find("ChargePort", 1, true) then
+                    and not (c:GetClass():GetFName():ToString() .. "|" .. o:GetClass():GetFName():ToString()):find("ChargePort", 1, true) then
                     local rel = kml:InverseTransformLocation(xf, o:K2_GetActorLocation())
                     local key = string.format("%s%s@%d,%d,%d", spec[1], o:GetClass():GetFName():ToString(),
                         math.floor(rel.X / 50 + 0.5), math.floor(rel.Y / 50 + 0.5), math.floor(rel.Z / 50 + 0.5))
@@ -169,7 +229,7 @@ return function(ctx)
     local function valuesText(vals, onlyKeys)
         local parts = {}
         for k, v in pairs(vals) do
-            if v and (not onlyKeys or onlyKeys[k]) then parts[#parts + 1] = string.format("%s=%.1f", k, v) end
+            if v and (not onlyKeys or onlyKeys[k]) then parts[#parts + 1] = string.format("%s=%.2f", k, v) end
         end
         table.sort(parts)
         return table.concat(parts, ";")
@@ -200,7 +260,7 @@ return function(ctx)
         local fresh = ck ~= host.clientsKey
         host.clientsKey = ck
         -- trunk
-        local t = trunk()
+        local t = on("trunk") and trunk() or nil
         if t then
             local text = entriesText(containerEntries(t))
             if fresh or text ~= host.trunkText then
@@ -210,18 +270,20 @@ return function(ctx)
             end
         end
         -- car parts
-        local car = ctx.playerCar()
+        local car = on("carstate") and ctx.playerCar() or nil
         if valid(car) then
             local vals = carValues(car)
             local changed = {}
             local n = 0
             for k, v in pairs(vals) do
-                if fresh or host.car[k] == nil or math.abs(host.car[k] - v) >= 0.5 then changed[k] = true; n = n + 1 end
+                if fresh or host.car[k] == nil or math.abs(host.car[k] - v) >= (k:sub(1, 1) == "H" and 0.5 or 0.1) then changed[k] = true; n = n + 1 end
             end
             if n > 0 then
-                for k in pairs(changed) do host.car[k] = vals[k] end
-                local text = valuesText(vals, changed)
-                if #text < ctx.CHAN_MAX - 50 then ctx.hostSend("CARST|" .. text) end
+                -- always the full state, and only the newest one waits in the queue (fuel drains every second;
+                -- queued partial updates made the client lag 5-8 s behind)
+                for k in pairs(vals) do host.car[k] = vals[k] end
+                local text = valuesText(vals)
+                if #text < ctx.CHAN_MAX - 50 then ctx.hostSendLatest("CARST|" .. text) end
                 if fresh or n >= 3 then log("CARSYNC host car state sent: %d value(s)%s", n, fresh and " (full)" or "") end
             end
         end
@@ -254,6 +316,26 @@ return function(ctx)
                     log("CARSYNC CARUP from %s: %s -> %.1f ok=%s", ctx.objName(pc), k, v, tostring(ok))
                 else
                     log("CARSYNC CARUP from %s: unknown part %s", ctx.objName(pc), k)
+                end
+            end
+            return true
+        elseif kind == "CARADD" then
+            local car = ctx.playerCar()
+            local comps = carComponents(car)
+            for k, d in pairs(parseValues(args)) do
+                local e = comps[k]
+                local cur = e and compValue(e)
+                if e and cur then
+                    local max = nil
+                    if e.kind == "F" then local b = {}; pcall(function() e.comp:GetFuelStatus({}, b, {}, {}, {}, {}, {}) end); max = b["Fuel Capacity"]
+                    elseif e.kind == "B" then local b = {}; pcall(function() e.comp:GetBatteryStatus({}, b, {}, {}, {}) end); max = b["Battery Capacity"] end
+                    local v = math.max(0, cur + d)
+                    if type(max) == "number" then v = math.min(v, max) end
+                    local ok = setCompValue(e, v)
+                    host.car[k] = nil
+                    log("CARSYNC CARADD from %s: %s %+.2f (%.2f -> %.2f) ok=%s", ctx.objName(pc), k, d, cur, v, tostring(ok))
+                else
+                    log("CARSYNC CARADD from %s: unknown part %s", ctx.objName(pc), k)
                 end
             end
             return true
@@ -291,6 +373,42 @@ return function(ctx)
     end
 
     -- ------------------------------------------------------------ client
+    -- player 2's refuel / charge actions on the car
+    local add = { flag = {}, keyByComp = {}, snap = {}, hooked = false, tries = 0 }
+    local FUEL_FN = "/Game/Gameplay/Inventory/GenericItemProperties/Components/BP_FuelableComponent.BP_FuelableComponent_C:TransferFuel"
+    local CHARGE_FN = "/Game/Gameplay/Inventory/GenericItemProperties/Components/BP_BatteryChargerComponent.BP_BatteryChargerComponent_C:DoCharge"
+    local function compKey(c)
+        if not valid(c) then return nil end
+        return add.keyByComp[c:GetFullName()]
+    end
+    -- a player action touched the car's fuel ("F") or battery ("B") this second
+    local function note(key)
+        if key then add.flag[key:sub(1, 1)] = true end
+    end
+    local function get(p)
+        local ok, v = pcall(function() return p:get() end)
+        return ok and v or nil
+    end
+    local function registerHooks()
+        if add.hooked or add.tries > 20 then return end
+        add.tries = add.tries + 1
+        local okF = StaticFindObject(FUEL_FN) and pcall(function()
+            RegisterHook(FUEL_FN, function(_, src, tgt, _, transferred)
+                note(compKey(get(tgt)))
+                note(compKey(get(src)))
+            end)
+        end)
+        local okC = StaticFindObject(CHARGE_FN) and pcall(function()
+            RegisterHook(CHARGE_FN, function(_, target)
+                note(compKey(get(target)))
+            end)
+        end)
+        if okF and okC then
+            add.hooked = true
+            log("CARSYNC hooked TransferFuel and DoCharge (player 2's refuel / charge)")
+        end
+    end
+
     local cl = { trunkActive = false, trunkBase = {}, carHost = {}, carActive = false,
                  id = nil, helloFor = nil, invLoaded = false, invText = nil, invSentTick = -100 }
 
@@ -320,7 +438,7 @@ return function(ctx)
     end
 
     ctx.hostMsgHandlers["TRUNK"] = function(rest)
-        local t = trunk()
+        local t = on("trunk") and trunk() or nil
         if not t then return end
         -- a change made here that the host has not seen yet: send it first, keep the local trunk
         if cl.trunkActive then
@@ -343,6 +461,7 @@ return function(ctx)
     end
 
     ctx.hostMsgHandlers["CARST"] = function(rest)
+        if not on("carstate") then return end
         local vals = parseValues(rest)
         local car = ctx.playerCar()
         local comps = carComponents(car)
@@ -352,18 +471,22 @@ return function(ctx)
             local e = comps[k]
             if e then
                 local cur = compValue(e)
-                if not cur or math.abs(cur - v) >= 0.5 then setCompValue(e, v); set = set + 1 end
+                -- the gas cap holds whole litres only (writing 19.5 keeps 19): do not fight it over less than 1
+                local tol = k:find("GasCap", 1, true) and 1.0 or 0.05
+                if not cur or math.abs(cur - v) >= tol then setCompValue(e, v); set = set + 1 end
+                if add.snap[k] then add.snap[k] = compValue(e) end
             else
                 missing = missing + 1
             end
         end
         cl.carActive = true
-        if set > 0 or missing > 0 then log("CARSYNC client car: %d value(s) set from host, %d part(s) not found here", set, missing) end
+        -- fuel drains every second on the host: log only bigger updates
+        if set >= 3 or missing > 0 then log("CARSYNC client car: %d value(s) set from host, %d part(s) not found here", set, missing) end
     end
 
     ctx.hostMsgHandlers["INVLOAD"] = function(rest)
         local id, text = rest:match("^([%w]+)|(.*)$")
-        if id ~= playerId() then return end
+        if id ~= playerId() or not on("invsave") then return end
         cl.invLoaded = true
         if text == "NONE" then log("CARSYNC no saved inventory on the host: keeping the current one"); return end
         local m = im()
@@ -403,7 +526,7 @@ return function(ctx)
             log("CARSYNC HELLO sent as %s", playerId())
         end
         -- trunk: local changes -> host
-        local t = trunk()
+        local t = on("trunk") and trunk() or nil
         if cl.trunkActive and t then
             local d, now = trunkDeltaText(t)
             if d then
@@ -413,9 +536,33 @@ return function(ctx)
             end
         end
         -- car: keep the host's values; increases made here go to the host
-        if cl.carActive then
+        if cl.carActive and on("carstate") then
             local car = ctx.playerCar()
             local comps = carComponents(car)
+            if on("refuel") then registerHooks() end
+            local byComp = {}
+            for k, e in pairs(comps) do byComp[e.comp:GetFullName()] = k end
+            add.keyByComp = byComp
+            local adds = {}
+            for k, e in pairs(comps) do
+                if e.kind == "F" or e.kind == "B" then
+                    local cur = compValue(e)
+                    if cur then
+                        local d = add.snap[k] and (cur - add.snap[k]) or 0
+                        if on("refuel") and add.flag[e.kind] and math.abs(d) >= 0.01 then
+                            adds[#adds + 1] = string.format("%s=%.2f", k, d)
+                            -- the hold below must not undo our own change before the host answers
+                            if cl.carHost[k] then cl.carHost[k] = cl.carHost[k] + d end
+                        end
+                        add.snap[k] = cur
+                    end
+                end
+            end
+            add.flag = {}
+            if #adds > 0 then
+                ctx.sendCommand("CARADD," .. table.concat(adds, ";"))
+                log("CARSYNC client refuel/charge sent: %s", table.concat(adds, ";"))
+            end
             local ups = {}
             for k, hv in pairs(cl.carHost) do
                 local e = comps[k]
@@ -437,7 +584,7 @@ return function(ctx)
             end
         end
         -- inventory: save on the host when it changes (at most every 5 s), after the saved one was loaded
-        if cl.invLoaded and fastTick - cl.invSentTick >= 25 then
+        if on("invsave") and cl.invLoaded and fastTick - cl.invSentTick >= 25 then
             local text = inventoryText()
             if text and text ~= cl.invText then
                 cl.invText = text

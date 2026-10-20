@@ -1,0 +1,8 @@
+; Copy to features.txt (same folder) to switch parts of the co-op mod off. A missing line means "on".
+; Both players should use the same switches.
+itemstate = on   ; items keep fuel / charge / durability / health over the network
+trunk = on       ; shared car trunk
+carstate = on    ; car part health, fuel and battery follow the host
+refuel = on      ; player 2's refuel and charge reach the host
+invsave = on     ; player 2's inventory is saved on the host and given back on rejoin
+downed = on      ; down instead of dead, revive (hold E), team death after 60 s

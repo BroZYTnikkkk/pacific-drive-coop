@@ -88,7 +88,13 @@ return function(ctx)
         if not StaticFindObject(LIFESAVER) then return end
         local ok, err = pcall(function()
             RegisterHook(LIFESAVER, function(_, incoming, updated)
-                if not ctx.enabled() or me.dying then return end
+                if not ctx.enabled() then return end
+                if me.dying then
+                    -- player 2 must not die in its own game while the team death runs (it would leave the session);
+                    -- the host dies through Adjust, which does not come through here
+                    if ctx.role() == "client" then pcall(function() updated:set(0) end) end
+                    return
+                end
                 local g = playerHealth()
                 if not g then return end
                 local d = updated:get()
@@ -200,7 +206,7 @@ return function(ctx)
         local mine = ctx.myPlayerId()
         local parts = {}
         for who, left in rest:gmatch("([^;=]+)=(%d+)") do
-            if who ~= tostring(mine) then parts[#parts + 1] = (who == "host" and "The host" or "Player " .. who) .. " is down: " .. left .. " s" end
+            if who ~= tostring(mine) then parts[#parts + 1] = "Your partner is down: " .. left .. " s" end
             if who == tostring(mine) then say("PDCoopSelf", "You are down: " .. left .. " s until the team dies. Wait for your partner.") end
         end
         if #parts > 0 then say("PDCoopOther", table.concat(parts, ", ") .. ". Hold " .. REVIVE_KEY .. " next to them to revive.")
@@ -335,6 +341,18 @@ return function(ctx)
         registerHooks()
         if ctx.role() == "host" then
             if host.dyingSince then return end
+            -- a downed player who left the session is no longer down here (no team death for an empty seat)
+            local present = {}
+            for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+                local ok, pid = pcall(function() return pc.PlayerState.PlayerId end)
+                if ok and valid(pc) and not pc:IsLocalController() then present[pid] = true end
+            end
+            for who in pairs(host.down) do
+                if who ~= "host" and not present[who] then
+                    host.down[who] = nil
+                    log("DOWNED host: %s left while down", tostring(who))
+                end
+            end
             -- downed characters for the host's revive: remote players that are down
             local chars = {}
             local status = {}
@@ -359,7 +377,7 @@ return function(ctx)
                 local others = {}
                 for who, since in pairs(host.down) do
                     local left = math.max(0, DOWN_SECONDS - math.floor(clock() - since))
-                    if who == "host" then mineLeft = left else others[#others + 1] = "Player " .. who .. " is down: " .. left .. " s" end
+                    if who == "host" then mineLeft = left else others[#others + 1] = "Your partner is down: " .. left .. " s" end
                 end
                 if mineLeft then say("PDCoopSelf", "You are down: " .. mineLeft .. " s until the team dies. Wait for your partner.") else unsay("PDCoopSelf") end
                 if #others > 0 then say("PDCoopOther", table.concat(others, ", ") .. ". Hold " .. REVIVE_KEY .. " next to them to revive.") else unsay("PDCoopOther") end

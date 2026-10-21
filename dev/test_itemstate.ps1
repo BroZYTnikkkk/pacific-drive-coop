@@ -64,4 +64,7 @@ $checks["fallback: unknown state gives 50% (5 of 10 fuel): $r"] = $r -match "hal
 $r = Dev "client2" "setstate player $slot F999"
 $checks["clamp: 999 fuel in a 10 l can is written as 10: $r"] = $r -match "-> F10$"
 
-Finish $Name "carsync error|items error|ITEMSTATE STATE LOST|NOT ENOUGH ON THE HOST"
+# (a trunk cannot hold enough for one message over 8 KB: exp83 fitted 15 cans and dropped the rest; message
+# parts are tested with the channel scenario: tools/run_test.ps1 -Scenario channel)
+
+Finish $Name "carsync error|items error|ITEMSTATE STATE LOST|NOT ENOUGH ON THE HOST|part \d+ missing"

@@ -1,4 +1,5 @@
--- PDCoopNet v6: Pacific Drive co-op experiments (carsync.lua: shared trunk, car state, player 2 inventory save).
+-- PDCoopNet v7: Pacific Drive co-op (carsync.lua: trunk, car state, player 2 inventory save; itemstate.lua: item
+-- fuel/charge/durability/health; downed.lua: down / revive / team death).
 -- Role comes from ue4ss/Mods/PDCoopNet/role.txt (line 1: host|client|off, line 2: map or address,
 -- line 3: scenario play|car|rejoincar|travel|gametravel|lootprobe|itemprobe|channel|loot, default play).
 -- play: no test bots. Keys: F8 host = host the current map (servertravel ?listen), F8 client = connect to the
@@ -561,12 +562,21 @@ local function remoteCommands()
 end
 
 local hostOut = { queue = {}, seq = 0, inflight = nil, sentTick = 0, payload = "", acksText = "" }
+-- A message over CHAN_MAX goes as parts "PART|<i>|<n>|<piece>" (a full trunk or inventory with item states can
+-- pass 8 KB); messages arrive one at a time and in order, the client joins the parts and handles the whole.
+local partSeq = 0
 local function hostSend(payload)
-    if #payload > CHAN_MAX then
-        log("CHAN message of %d bytes is over %d, not sent", #payload, CHAN_MAX)
+    if #payload <= CHAN_MAX then
+        table.insert(hostOut.queue, payload)
         return
     end
-    table.insert(hostOut.queue, payload)
+    local size = CHAN_MAX - 40
+    local n = math.ceil(#payload / size)
+    partSeq = partSeq + 1
+    for i = 1, n do
+        table.insert(hostOut.queue, string.format("PART|%d|%d|%d|%s", partSeq, i, n, payload:sub((i - 1) * size + 1, i * size)))
+    end
+    log("CHAN message of %d bytes sent in %d parts", #payload, n)
 end
 
 -- a message that replaces a queued one of the same kind (full-state messages: only the newest matters)
@@ -661,6 +671,27 @@ local function clientChannelTick()
     end
 end
 
+local partBuf = { id = nil, parts = {} }
+hostMsgHandlers["PART"] = function(rest, seq)
+    local id, i, n, piece = rest:match("^(%d+)|(%d+)|(%d+)|(.*)$")
+    i, n = tonumber(i), tonumber(n)
+    if not id then return end
+    if i == 1 or partBuf.id ~= id then partBuf = { id = id, parts = {} } end
+    partBuf.parts[i] = piece
+    if i < n then return end
+    for k = 1, n do
+        if not partBuf.parts[k] then log("CHAN message %s: part %d missing, dropped", id, k); partBuf = { id = nil, parts = {} }; return end
+    end
+    local payload = table.concat(partBuf.parts)
+    partBuf = { id = nil, parts = {} }
+    local kind, body = payload:match("^([^|]+)|?(.*)$")
+    local h = hostMsgHandlers[kind or ""]
+    if h and kind ~= "PART" then
+        local okH, errH = pcall(h, body or "", seq)
+        if not okH then log("CHAN handler %s failed: %s", tostring(kind), tostring(errH)) end
+    end
+end
+
 -- channel test: PING|<i>|<size>|xxx...|END
 hostMsgHandlers["PING"] = function(rest, seq)
     local i, size, body = rest:match("^(%d+)|(%d+)|(.*)$")
@@ -671,7 +702,7 @@ local pingQueued = false
 local function queueChannelTest()
     if pingQueued then return end
     pingQueued = true
-    local sizes = { 20, 200, 1000, 4000, 7900, 7900, 20, 20, 20, 20 }
+    local sizes = { 20, 200, 1000, 4000, 7900, 12000, 20000, 20, 20, 20 }   -- 12000 and 20000 go in parts
     for i, n in ipairs(sizes) do hostSend("PING|" .. i .. "|" .. n .. "|" .. string.rep("x", n) .. "|END") end
     log("CHAN queued %d test messages", #sizes)
 end

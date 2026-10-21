@@ -294,6 +294,9 @@ return function(ctx)
         if kind == "TRUNKD" then
             local t = trunk()
             if not t then log("CARSYNC TRUNKD: host has no trunk"); return true end
+            -- the host answers every change with its list, also when the change did nothing here (an item the
+            -- host had already taken): the client's trunk then follows the host again
+            host.trunkText = nil
             for _, e in ipairs(parseEntries(args)) do
                 if e[2] > 0 then
                     local added = addItems(t, e[1], e[2])
@@ -410,7 +413,7 @@ return function(ctx)
     end
 
     local cl = { trunkActive = false, trunkBase = {}, carHost = {}, carActive = false,
-                 id = nil, helloFor = nil, invLoaded = false, invText = nil, invSentTick = -100 }
+                 id = nil, helloFor = nil, invLoaded = false, invRestored = false, invText = nil, invSentTick = -100 }
 
     local function playerId()
         if cl.id then return cl.id end
@@ -488,6 +491,10 @@ return function(ctx)
         local id, text = rest:match("^([%w]+)|(.*)$")
         if id ~= playerId() or not on("invsave") then return end
         cl.invLoaded = true
+        -- only once per launch of player 2's game: its inventory lives on across map changes and rejoins, and a
+        -- save up to 5 s old would take back items picked up since (or undo the losses of a team death)
+        if cl.invRestored then log("CARSYNC saved inventory not applied: this game already has player 2's inventory"); return end
+        cl.invRestored = true
         if text == "NONE" then log("CARSYNC no saved inventory on the host: keeping the current one"); return end
         local m = im()
         local n = 0

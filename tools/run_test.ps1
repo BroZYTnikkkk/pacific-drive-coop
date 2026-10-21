@@ -209,7 +209,7 @@ if ($Scenario -eq "channel") {
     $recv = @(Select-String -Path $clientLog -Pattern "CHAN recv PING seq=\d+ i=(\d+) size=(\d+) intact=true")
     $acks = @(Select-String -Path $hostLog -Pattern "CHAN acked seq=\d+ bytes=(\d+) after (\d+) ticks")
     $checks["client received all 10 host messages intact ($($recv.Count))"] = $recv.Count -eq 10
-    $checks["host saw all 10 acknowledged ($($acks.Count))"] = $acks.Count -eq 10
+    $checks["host saw all messages acknowledged, parts included ($($acks.Count) >= 10)"] = $acks.Count -ge 10
     Write-Output "===== CHANNEL"
     $acks | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
     Select-String -Path $clientLog, $hostLog -Pattern "CHAN (send failed|handler|recv PING .*intact=false)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }

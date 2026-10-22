@@ -100,4 +100,4 @@ if ($hl -match "no tombstone found") { Write-Output "note: $([regex]::Match($hl,
 $hp = Health "client2"
 $checks["player 2 is alive in the garage with health ($hp)"] = $hp -gt 5
 
-Finish $Name "downed error|carsync error|items error"
+Finish $Name "downed error|carsync error|items error|worldrep error"

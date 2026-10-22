@@ -590,6 +590,40 @@ commands.holdrevive = function(a)
     ModRef:SetSharedVariable("PDCoopDev_HoldRevive", v)
     return "holdrevive " .. tostring(v)
 end
+-- snapshot <tag> [grid]: every actor of the world (class, position rounded to grid uu, default 100) into
+-- ue4ss/Mods/PDCoopDev/snap_<tag>.txt, for comparing two games' worlds (world-sync experiment)
+commands.snapshot = function(a)
+    local tag = a[1] or "x"
+    local grid = tonumber(a[2]) or 100
+    local skip = { PlayerController = true, PlayerState = true, PDP_MainCharacter_C = true, HUD = true }
+    local lines, n = {}, 0
+    for _, x in ipairs(H.find("Actor")) do
+        local okC, c = pcall(function() return x:GetClass():GetFName():ToString() end)
+        if okC and c and not skip[c] and not c:find("Controller") and not c:find("PlayerState") and not c:find("Camera") then
+            local okL, l = pcall(function() return x:K2_GetActorLocation() end)
+            if okL and l then
+                lines[#lines + 1] = string.format("%s %d %d %d", c, math.floor(l.X / grid + 0.5), math.floor(l.Y / grid + 0.5), math.floor(l.Z / grid + 0.5))
+                n = n + 1
+            end
+        end
+    end
+    table.sort(lines)
+    local w = UEHelpers.GetWorld()
+    local f = io.open(DIR .. "snap_" .. tag .. ".txt", "w")
+    if f then f:write("# world " .. (valid(w) and w:GetFullName() or "?") .. "\n" .. table.concat(lines, "\n") .. "\n"); f:close() end
+    return string.format("%d actors -> snap_%s.txt", n, tag)
+end
+-- loadslot <slot>: the game's own load of a save slot (BP_SaveGameManager:UserLoadGame)
+commands.loadslot = function(a)
+    local sm = H.first("BP_SaveGameManager_C") or H.first("BaseSaveGameManager")
+    if not valid(sm) then return "no save game manager" end
+    local slot, mode = {}, {}
+    pcall(function() sm:GetLastPlayedSlot(slot, mode) end)
+    local s = tonumber(a[1]) or slot.Slot or 1
+    local m = mode.PlaySlot or 0
+    local ok, err = pcall(function() sm:UserLoadGame(s, m, 0) end)
+    return string.format("UserLoadGame(%s, mode %s) ok=%s %s (last played %s)", tostring(s), tostring(m), tostring(ok), ok and "" or tostring(err), H.fmt(slot))
+end
 -- hitother [n]: n hits of 30 on the OTHER player's character here (its receiver on this machine); with the fix
 -- for "one HP for two" this player's health must not change
 commands.hitother = function(a)

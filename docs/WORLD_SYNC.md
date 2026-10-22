@@ -29,12 +29,50 @@ shared save still matters for everything the client game keeps itself (progressi
 Next: replicate every generated class (cars + parts, props, destructibles, containers), check visuals, interaction
 (doors, trunks of abandoned cars, looting), and traffic; then remove the client's own duplicates if any appear.
 
+## Experiment exp94: every generated actor (mod module `worldrep.lua`)
+Host: every actor without `RF_WasLoaded` -> `SetReplicates`, `SetReplicateMovement`, relevant to 1.5 km, 2 updates
+per second; skipped: items (mirrored by the mod), pawns, the player car and everything attached to it, child
+actors, controllers / states / game mode / HUD / cameras / managers. Compared with `dev/snapdiff.ps1` (class by
+class, same or neighbour 50 uu cell).
+- First run (all runtime actors, 1 km): client 895 -> 2924 actors, an abandoned car seen on the client's screen.
+  Duplicates: the player car's `BP_CarPart_Interactive_C` 53 -> 106 (the client has its own car), child actors
+  (`BP_Destruct_ChainFence_Large_01_C` 16 -> 32: the replicated parent spawns them again on the client).
+- With those skipped: client 1146 -> 5111 (host 7719). No car part doubles. Landmines 236 -> 0: the re-host
+  (`servertravel <same map>?listen`) builds a new world with the same actor names and the module still thought it
+  had handled them; it now forgets a world by its address.
+- Landmines are still 0 on the client: `BP_Hazard_Landmine_C` is an `ItemWorldManifestation` (hazards are items in
+  this game) and the module leaves items to the mod's item mirror, which does not take them either. Hazards are
+  their own step (order above). The radiation volumes `BP_VolCascade_Radiation_C` are spawned by each game on its
+  own, at different places (host 85, the client's own 81 elsewhere): also the hazards step.
+- Client-local runtime actors (role authority on the client, exp96: 694) were the rest of the duplicates: prefab
+  trees (PrefabSettingsActor -> ManageChildrenActor -> StaticMeshActor, shrubs, fences, road splines) that the
+  client game builds itself in the same places. Nothing on the host tells them apart from host-only prefabs
+  (neither is loaded with the level, none has an owner). Host side, what hangs on a level actor is no longer
+  replicated; client side, the module removes its own copy of an actor when a replicated actor of the same class
+  is in the same or a neighbour 60 uu cell (exp97: ~400 removed in the first minute, incl. lootable containers,
+  doors, lights, posters). The host's copy is the one that breaks / opens.
+- exp97 result (Rural_Forest_Bridge_Elf_01, 1 min after the join, both near the start): host 7590, client 5938;
+  "extra" left on the client 1240, mostly physics props (traffic cones, barricades, floating rocks) a few cells
+  away from the host's (simulated on both sides) and attachments the engine cannot replicate
+  (`FNetGUIDCache::SupportsObject` warnings: a parent component that is not net addressable); "missing" 2898,
+  mostly beyond the 1.5 km relevance (they come when a player gets near).
+- (The exp94-97 totals above are a little high: `snapdiff.ps1` counted a class with one actor as three; fixed in
+  exp99, the trends are the same.)
+- exp99/100 (`dev/test_worldrep.ps1`, 40 s after the join): host 7668, client 7000 (91 %), abandoned
+  `BP_Template_CivCar_01_C` 81 of 82, gas barrels 185 of 202; extra on the client 909 (12 %), missing 1570 (224 of
+  them landmines). The player car's parts match (`BP_CarPart_Interactive_C` 53 / 53), but its **set of installed
+  parts** differs: the host's car has an empty door, headlight and wheel slot where the client's has parts. The
+  mod syncs part health, not which part is installed: a car sync gap, not a world one.
+- Next: doors and lootable containers on replicated actors (the client's interaction runs on its proxy; the host
+  must do it and send the result), physics props, hazards, the garage (309 runtime actors there are replicated
+  too: check that the client has no doubles there).
 
 
-Status 2026-10-22: each player's game generates its own world. The mod mirrors only world items (loot), the car
-(transform, part health, fuel, battery), the trunk and the players. Everything else differs: doors, props (trash
-bags), lootable containers, anomalies/hazards, weather, the map. Collision of a door comes from the host (the client
-character moves on the host), so a door open only on the client blocks it.
+
+Status before exp93 (2026-10-22): each player's game generated its own world. The mod mirrored only world items
+(loot), the car (transform, part health, fuel, battery), the trunk and the players. Everything else differed: doors,
+props (trash bags), lootable containers, anomalies/hazards, weather, the map. Collision of a door comes from the
+host (the client character moves on the host), so a door open only on the client blocks it.
 
 Playbook background (coop-anything `how-coop-mods-work`): retrofits onto closed single-player games are
 host-authoritative state sync; "snapshot on join" (full state, then deltas) is the recommended base, and Anchor

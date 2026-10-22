@@ -61,4 +61,4 @@ Start-Sleep 10
 $st = Dev "client1" "state"
 $checks["the host is still running 10 s after the drop"] = $st -match "net: host"
 
-Finish $Name "carsync error|items error|downed error|trunklock error|bodies error"
+Finish $Name "carsync error|items error|downed error|trunklock error|bodies error|worldrep error"

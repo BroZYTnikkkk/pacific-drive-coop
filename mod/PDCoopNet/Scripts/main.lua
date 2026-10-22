@@ -31,8 +31,10 @@ local ROLE, ARG, SCENARIO = readRole()
 -- Feature switches: ue4ss/Mods/PDCoopNet/features.txt, one "<name> = on|off" per line; missing = on.
 -- itemstate (item fuel/charge/durability/health over the network), trunk (shared trunk), carstate (car part
 -- health/fuel/battery follow the host), refuel (player 2's refuel/charge reach the host), invsave (player 2's
--- inventory saved on the host), downed (down instead of dead, revive, team death).
-local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true }
+-- inventory saved on the host), downed (down instead of dead, revive, team death), worldrep (the host's generated
+-- zone content: abandoned cars, props, barrels... replicated to player 2).
+local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true,
+                   worldrep = true }
 do
     local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
     if f then
@@ -775,6 +777,12 @@ local Downed = require("downed")({
         end
         return false
     end,
+})
+
+-- the host's generated zone content replicated to player 2 by the engine (worldrep.lua)
+local WorldRep = require("worldrep")({
+    log = log, valid = valid, isCar = isCar, UEHelpers = UEHelpers,
+    enabled = function() return feature("worldrep") end,
 })
 
 -- the world items of this machine: list of { actor, id, arch, x, y, z, p, yw, r }
@@ -1667,6 +1675,7 @@ local function resetPerMapState(newWorld)
     gmLogged = false
     mapTicks = 0
     pcall(Downed.mapChanged, newWorld)
+    pcall(WorldRep.reset)
     -- one re-host per ARRIVAL, not per map name: after a team death the host comes back to RB_Garage, which it had
     -- already re-hosted earlier in the session, and was left without a listen server (playtest 2026-10-21: player 2
     -- could not rejoin until the host pressed F8). No loop: after the re-host the world is not standalone.
@@ -1972,11 +1981,19 @@ LoopInGameThreadWithDelay(200, function()
             ok, err = pcall(CarSync.hostTick)
             if not ok then log("carsync error: %s", tostring(err)) end
         end
+        if fastTick % 25 == 3 then   -- every 5 s: zone generation spawns over time, and storms spawn more
+            ok, err = pcall(WorldRep.hostTick)
+            if not ok then log("worldrep error: %s", tostring(err)) end
+        end
         ok, err = pcall(hostChannelTick)
         if not ok then log("chan error: %s", tostring(err)) end
     elseif ROLE == "client" then
         local ok, err = pcall(clientChannelTick)
         if not ok then log("chan error: %s", tostring(err)) end
+        if fastTick % 25 == 8 then   -- standalone: no replicated actors, nothing matches
+            ok, err = pcall(WorldRep.clientTick)
+            if not ok then log("worldrep error: %s", tostring(err)) end
+        end
         if fastTick % 5 == 0 then
             ok, err = pcall(clientItemsTick)
             if not ok then log("items error: %s", tostring(err)) end

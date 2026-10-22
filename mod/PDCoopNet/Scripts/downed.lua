@@ -109,6 +109,9 @@ return function(ctx)
                     return
                 end
                 if not ctx.enabled() then return end
+                -- the garage is the game's own: after a team death it sets the health of the woken-up player with a
+                -- hit (20 -> 0.2, exp98), which is not a lethal hit to catch; nobody goes down there
+                if me.world == "RB_Garage" or me.world == "RB_MainMenu" then return end
                 if me.dying then
                     -- player 2 must not die in its own game while the team death runs (it would leave the session);
                     -- the host dies through Adjust, which does not come through here
@@ -424,6 +427,7 @@ return function(ctx)
     -- a new map: the team death is over (garage), downs are possible again
     function M.mapChanged(worldName)
         if me.dying then log("DOWNED new map %s after the team death", tostring(worldName)) end
+        me.world = worldName
         me.dying, me.down = false, false
         host.down = {}
         revive.lastMsg = ""

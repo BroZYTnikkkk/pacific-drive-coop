@@ -43,6 +43,7 @@ Switch the part off and keep playing: in `<game>\PenDriverPro\Binaries\Win64\ue4
 | items lose or gain fuel / durability | `itemstate` |
 | the friend's inventory is wrong after rejoining | `invsave` |
 | dying / reviving misbehaves | `downed` |
+| lag or crashes in a zone, doubled cars / props for the friend | `worldrep` (on the host) |
 
 ## What to send back
 

@@ -29,6 +29,7 @@ listen-server netcode and driven by a [UE4SS](https://github.com/UE4SS-RE/RE-UE4
 | Player 2 refuels the car from a can and charges it with the battery charger tool: the host's car gets it (only player actions count, the host computes background changes) | `dev/test_refuel.ps1` | 10/10 |
 | Down instead of dead: 60 s, no damage while down, the other player revives (hold E 5 s within 2 m; 60 % health with a food / medicine item, which is used up, else 20 %), both directions | `dev/test_downed.ps1` (zone) | 17/17 |
 | Team death (not revived in 60 s, or both down): the game's own death on the host, back to the garage, player 2 rejoins; player 2's pockets go through the game's own item removal with the host's arguments | `dev/test_downed.ps1` (zone) | 17/17 |
+| World in a zone: the host's generated content (abandoned cars and parts, props, barrels, containers) is replicated to player 2 within 1.5 km; player 2's own copies of the same prefabs are removed, the player car's parts are not doubled | `dev/test_worldrep.ps1` (generated zone) | 12/12 |
 | Feature switches (`features.txt`) to turn each new part off | manual | - |
 | Seated bodies are lowered into the seat and do not collide with the car; the passenger's camera mirrors the driver's | `rejoincar` | pass |
 
@@ -37,10 +38,13 @@ or the car, in which case they are seated as a passenger). Saved positions and t
 
 ## Known gaps
 
-- **The two players have different worlds.** Each game generates its own world; the mod shares only world items
-  (loot), the car (position, parts, fuel, battery) and its trunk. Doors, props, containers outside the car,
-  hazards and weather are per player: a door opened by one is closed for the other (collision comes from the
-  host), each has its own loot in containers. Making the worlds the same is the next big step.
+- **The world is shared only in part.** In a zone the host's generated content (abandoned cars and their parts,
+  props, barrels, containers, signs...) is sent to player 2 by the engine (`worldrep`, see `docs/WORLD_SYNC.md`):
+  player 2 sees what the host sees within 1.5 km. Not yet: opening doors / containers / trunks of abandoned cars
+  (player 2 sees only their own action), physics props may sit a little apart, hazards (landmines are not sent,
+  radiation clouds differ) and weather.
+- **Which parts are installed on the car is not synced** (only their health, fuel, battery): a part taken off or
+  put on by one player can look different for the other.
 - **Esc on the host is off while a partner is connected**: the host's pause menu crashed the game natively
   (playtest 2026-10-21, reproduced). Settings and quit-to-menu are reachable when the partner is not connected.
 - The trunk is used by one player at a time: while it is open at one player, the other cannot open it.

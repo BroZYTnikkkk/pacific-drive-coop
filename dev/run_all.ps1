@@ -14,7 +14,8 @@ $runs = @(
     @{ n = "refuel";    cmd = { & powershell -NoProfile -File "$PSScriptRoot\test_refuel.ps1" -Name "$Prefix-refuel" -Root $Root } },
     @{ n = "downed";    cmd = { & powershell -NoProfile -File "$PSScriptRoot\test_downed.ps1" -Name "$Prefix-downed" -Root $Root } },
     @{ n = "rejoincar"; cmd = { & powershell -NoProfile -File "$tools\run_test.ps1" -Name "$Prefix-rejoincar" -Seconds 300 -Scenario rejoincar -Root $Root } },
-    @{ n = "loot";      cmd = { & powershell -NoProfile -File "$tools\run_test.ps1" -Name "$Prefix-loot" -Seconds 300 -Scenario loot -Root $Root } }
+    @{ n = "loot";      cmd = { & powershell -NoProfile -File "$tools\run_test.ps1" -Name "$Prefix-loot" -Seconds 300 -Scenario loot -Root $Root } },
+    @{ n = "worldrep";  cmd = { & powershell -NoProfile -File "$PSScriptRoot\test_worldrep.ps1" -Name "$Prefix-worldrep" -Root $Root } }
 )
 $summary = @()
 foreach ($r in $runs) {

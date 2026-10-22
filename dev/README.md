@@ -12,6 +12,10 @@ Do not install `PDCoopDev` for normal play: it has cheats and runs Lua sent thro
 | `test_itemstate.ps1` | items keep fuel / durability through the trunk, the world, pickups and the saved inventory; 50 % fallback; clamp |
 | `test_refuel.ps1` | player 2 refuels (TransferFuel) and charges (DoCharge) the car, the host's car gets it |
 | `test_downed.ps1` | down instead of dead, revive both ways (with / without food), team death after 60 s, player 2's losses, tombstone (zone map, `-ResetSave`) |
+| `test_worldrep.ps1` | the host's generated zone content reaches player 2 (zone via `zone_pair.ps1`, compared with `snapdiff.ps1`): coverage, no doubles of the car parts / prefabs |
+| `zone_pair.ps1` | host loads a save slot, drives the route into a real generated zone, re-hosts it, player 2 joins; leaves both running |
+| `snapdiff.ps1` | compares two `snapshot` files class by class: counts, actors without a twin on the other side |
+| `run_all.ps1` | every test one after the other, one summary line each |
 | `testlib.ps1` | helpers shared by the tests |
 
 ```
@@ -42,6 +46,8 @@ main README). The copies run with `-NotInstalled`, so they never touch your own 
 | `tp x y z`, `tpcar`, `carhere` | teleports |
 | `find <class> [filter]`, `props <class\|name> [filter]`, `funcs <class\|name> [filter]` | reflection: live objects, property values, functions |
 | `shot`, `con <console command>` | screenshot, console |
+| `snapshot <tag> [grid]` | every actor (class + position in grid cells, default 50 uu) to `PDCoopDev/snap_<tag>.txt` |
+| `loadslot <n>` | loads save slot n from the main menu |
 | `lua <code>`, `luafile <path>` | runs Lua in the game thread; the helpers (`me()`, `car()`, `im()`, `find()`, `props()`, `arch()`, `carParts()`, `res()`...) are in scope, the result is printed |
 
 Keys in the game window: Ctrl+F9 god mode, Ctrl+F10 repair/refuel/charge the car, Ctrl+F11 state into the UE4SS log.

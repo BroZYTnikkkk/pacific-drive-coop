@@ -67,4 +67,4 @@ $checks["clamp: 999 fuel in a 10 l can is written as 10: $r"] = $r -match "-> F1
 # (a trunk cannot hold enough for one message over 8 KB: exp83 fitted 15 cans and dropped the rest; message
 # parts are tested with the channel scenario: tools/run_test.ps1 -Scenario channel)
 
-Finish $Name "carsync error|items error|ITEMSTATE STATE LOST|NOT ENOUGH ON THE HOST|part \d+ missing"
+Finish $Name "carsync error|items error|ITEMSTATE STATE LOST|NOT ENOUGH ON THE HOST|part \d+ missing|worldrep error"

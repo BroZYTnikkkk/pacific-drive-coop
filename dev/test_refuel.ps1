@@ -48,4 +48,4 @@ $b1 = LimBattery "client1"; $bc = LimBattery "client2"
 $checks["player 2 charged the car battery ($r)"] = $r -match "^charged\s+[1-9]"
 $checks["the host's battery got the charge ($b0 -> $b1, client $bc)"] = ($b1 -gt $b0 + 5) -and ([math]::Abs($b1 - $bc) -lt 0.5)
 
-Finish $Name "carsync error|items error|ITEMSTATE STATE LOST|CARADD .*unknown part"
+Finish $Name "carsync error|items error|ITEMSTATE STATE LOST|CARADD .*unknown part|worldrep error"

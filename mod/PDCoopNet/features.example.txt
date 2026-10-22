@@ -6,3 +6,4 @@ carstate = on    ; car part health, fuel and battery follow the host
 refuel = on      ; player 2's refuel and charge reach the host
 invsave = on     ; player 2's inventory is saved on the host and given back on rejoin
 downed = on      ; down instead of dead, revive (hold E), team death after 60 s
+worldrep = on    ; the host's zone content (abandoned cars, props, barrels) shows up for player 2 (host side)

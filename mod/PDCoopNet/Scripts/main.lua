@@ -783,6 +783,8 @@ local Downed = require("downed")({
 local WorldRep = require("worldrep")({
     log = log, valid = valid, isCar = isCar, UEHelpers = UEHelpers,
     enabled = function() return feature("worldrep") end,
+    hostSend = function(payload) hostSend(payload) end,
+    hostMsgHandlers = hostMsgHandlers,
 })
 
 -- the world items of this machine: list of { actor, id, arch, x, y, z, p, yw, r }
@@ -1990,7 +1992,11 @@ LoopInGameThreadWithDelay(200, function()
     elseif ROLE == "client" then
         local ok, err = pcall(clientChannelTick)
         if not ok then log("chan error: %s", tostring(err)) end
-        if fastTick % 25 == 8 then   -- standalone: no replicated actors, nothing matches
+        if fastTick % 10 == 6 then   -- standalone: no replicated actors, nothing matches
+            ok, err = pcall(WorldRep.clientPlaceTick)
+            if not ok then log("worldrep error: %s", tostring(err)) end
+        end
+        if fastTick % 25 == 8 then
             ok, err = pcall(WorldRep.clientTick)
             if not ok then log("worldrep error: %s", tostring(err)) end
         end

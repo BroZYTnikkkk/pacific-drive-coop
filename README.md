@@ -29,7 +29,7 @@ listen-server netcode and driven by a [UE4SS](https://github.com/UE4SS-RE/RE-UE4
 | Player 2 refuels the car from a can and charges it with the battery charger tool: the host's car gets it (only player actions count, the host computes background changes) | `dev/test_refuel.ps1` | 10/10 |
 | Down instead of dead: 60 s, no damage while down, the other player revives (hold E 5 s within 2 m; 60 % health with a food / medicine item, which is used up, else 20 %), both directions | `dev/test_downed.ps1` (zone) | 17/17 |
 | Team death (not revived in 60 s, or both down): the game's own death on the host, back to the garage, player 2 rejoins; player 2's pockets go through the game's own item removal with the host's arguments | `dev/test_downed.ps1` (zone) | 17/17 |
-| World in a zone: the host's generated content (abandoned cars and parts, props, barrels, containers) is replicated to player 2 within 1.5 km; player 2's own copies of the same prefabs are removed, the player car's parts are not doubled | `dev/test_worldrep.ps1` (generated zone) | 12/12 |
+| World in a zone: the host's generated content (abandoned cars and parts, props, barrels, containers) is replicated to player 2 within 1.5 km; player 2's own copies of the same prefabs are removed, the player car's parts are not doubled; attached content (doors, prefab props) is moved to the host's spots | `dev/test_worldrep.ps1` (generated zone) | 14/14 |
 | Feature switches (`features.txt`) to turn each new part off | manual | - |
 | Seated bodies are lowered into the seat and do not collide with the car; the passenger's camera mirrors the driver's | `rejoincar` | pass |
 

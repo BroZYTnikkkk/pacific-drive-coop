@@ -63,6 +63,26 @@ class, same or neighbour 50 uu cell).
   them landmines). The player car's parts match (`BP_CarPart_Interactive_C` 53 / 53), but its **set of installed
   parts** differs: the host's car has an empty door, headlight and wheel slot where the client's has parts. The
   mod syncs part health, not which part is installed: a car sync gap, not a world one.
+- **Attached actors were off** (exp101): doors 500-900 uu from the host's. The engine sends an attached actor as
+  "attached to the root actor of its attachment chain, at its offset to its immediate parent" when the immediate
+  parent component is not net addressable; the prefab "folder" actors (plain `Actor` named SetDressing, Layout,
+  DOORS..., under PrefabSettingsActor -> building frame -> folder -> self-deletor -> door) create their root
+  components at runtime, which are not (`FNetGUIDCache::SupportsObject` warnings, 2000+ per zone). The host's
+  prediction "root transform * offset" matched the client's spot within 3 uu.
+  - Tried: `SetIsReplicated(true)` on those parent components. Warnings 2000 -> 40, but the client then got its
+    own copies of the components with other names and put the folders at their offsets as world positions:
+    worse. Reverted.
+  - Tried: 16-bit rotation for the replicated movement (`ReplicatedMovement.RotationQuantizationLevel = 1` on the
+    host). **Breaks the connection**: the level is not sent, the client reads with its default ("Failed to receive
+    property ReplicatedMovement", disconnect, exp106). Never change it on one side only.
+  - Works (exp104-107): the host computes where the client will put each such actor (root location rounded to
+    whole units, root rotation in 360/256 degree steps, as `ReplicatedMovement` sends them, times the offset) and
+    sends "class, that spot -> the right transform" through the mod channel (~3000 entries, 120-150 KB, packed up
+    to 7 KB per message, nearest to player 2 first: about 20 messages, the channel does ~2 per second). It checks
+    each actor again ~10 s after spawning (a prefab moves content after spawning it). The client keeps the table
+    and moves every matching replicated actor every 2 s, also when it comes back into relevance or the engine
+    re-applies the attachment. exp107: all doors near both players on the host's spots, extra on the client 616
+    of 5075 (12 %).
 - Next: doors and lootable containers on replicated actors (the client's interaction runs on its proxy; the host
   must do it and send the result), physics props, hazards, the garage (309 runtime actors there are replicated
   too: check that the client has no doubles there).

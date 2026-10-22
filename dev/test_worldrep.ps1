@@ -11,7 +11,17 @@ $z = (& powershell -NoProfile -File "$PSScriptRoot\zone_pair.ps1" -Slot $Slot -R
 Write-Output $z
 $zone = [regex]::Match($z, "host zone: (\S+)").Groups[1].Value
 $checks["player 2 joined the host in a generated zone ($zone)"] = ($z -match "client joined: True") -and $zone -and ($zone -notmatch "RB_")
-Start-Sleep 40      # the module runs every 5 s; replication and the client's clean-up need a few passes
+# the module runs every 5 s on the host, the placement fixes go through the channel (~2 messages/s), the client
+# applies them every 2 s: wait until the client has not moved anything for 10 s (at most 120 s)
+$clientLog0 = "$Root\client2\$bin\ue4ss\UE4SS.log"
+$deadline = (Get-Date).AddSeconds(120); $lastMoves = -1; $quiet = 0
+Start-Sleep 20
+while ((Get-Date) -lt $deadline) {
+    $moves = @(Select-String -Path $clientLog0 -Pattern "WORLDREP client: moved" -ErrorAction SilentlyContinue).Count
+    if ($moves -eq $lastMoves) { $quiet += 5 } else { $quiet = 0; $lastMoves = $moves }
+    if ($quiet -ge 10 -and $moves -gt 0) { break }
+    Start-Sleep 5
+}
 
 $out = Join-Path $Root "results\$Name"
 New-Item -ItemType Directory -Force $out | Out-Null
@@ -43,6 +53,10 @@ $fence = Row "BP_Destruct_ChainFence_Large_01_C"
 $checks["prefab content is not doubled (chain fences host $($fence.Host), player 2 $($fence.Client))"] = [int]$fence.Client -le [math]::Max([int]$fence.Host, 16)
 # exp97: 1240 of 5938 (21 %), mostly physics props a few cells apart
 $checks["few actors on player 2 that the host does not have at that spot ($x of $c, at most 30 %)"] = $c -gt 0 -and ($x / $c) -le 0.3
+# attached actors (doors, prefab content under the prefab "folder" actors): exp101 had all doors 500-900 uu off
+$door = Row "BP_Door_Single_C"
+$checks["doors are where the host has them (host $($door.Host), player 2 $($door.Client), off $($door.Extra))"] = [int]$door.Host -gt 0 -and [int]$door.Client -gt 0 -and [int]$door.Extra -eq 0
+$checks["player 2 moved attached actors to the host's spots (placement fixes)"] = [bool](Select-String -Path $clientLog -Pattern "WORLDREP client: moved" -Quiet)
 $checks["player 2 removed its own copies of the host's actors"] = [bool](Select-String -Path $clientLog -Pattern "WORLDREP client: removed" -Quiet)
 $st = Dev "client1" "state"
 $checks["the host is still running with player 2"] = $st -match "net: host\s+players: 2"

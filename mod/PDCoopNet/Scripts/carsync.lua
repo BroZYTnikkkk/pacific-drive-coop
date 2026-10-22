@@ -157,6 +157,10 @@ return function(ctx)
     end
 
     M.keyOf = function(inst) return keyOf(inst) end
+    -- the container helpers of the trunk sync, for other shared containers (worldloot.lua)
+    M.containerEntries, M.entriesText, M.parseEntries = containerEntries, entriesText, parseEntries
+    M.countsOf, M.countsDiff, M.rebuild = countsOf, countsDiff, rebuild
+    M.addItems, M.removeItems = addItems, removeItems
     -- adds "<key>*<n>;..." to a container; returns the number of items added
     M.addEntries = function(cont, text)
         local n = 0

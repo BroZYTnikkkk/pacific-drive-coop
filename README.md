@@ -29,7 +29,9 @@ listen-server netcode and driven by a [UE4SS](https://github.com/UE4SS-RE/RE-UE4
 | Player 2 refuels the car from a can and charges it with the battery charger tool: the host's car gets it (only player actions count, the host computes background changes) | `dev/test_refuel.ps1` | 10/10 |
 | Down instead of dead: 60 s, no damage while down, the other player revives (hold E 5 s within 2 m; 60 % health with a food / medicine item, which is used up, else 20 %), both directions | `dev/test_downed.ps1` (zone) | 17/17 |
 | Team death (not revived in 60 s, or both down): the game's own death on the host, back to the garage, player 2 rejoins; player 2's pockets go through the game's own item removal with the host's arguments | `dev/test_downed.ps1` (zone) | 17/17 |
-| World in a zone: the host's generated content (abandoned cars and parts, props, barrels, containers) is replicated to player 2 within 1.5 km; player 2's own copies of the same prefabs are removed, the player car's parts are not doubled; attached content (doors, prefab props) is moved to the host's spots | `dev/test_worldrep.ps1` (generated zone) | 14/14 |
+| World in a zone: the host's generated content (abandoned cars and parts, props, barrels, containers) is replicated to player 2 within 1.5 km; player 2's own copies of the same prefabs are removed, the player car's parts are not doubled; attached content (doors, prefab props) is moved to the host's spots | `dev/test_worldrep.ps1` (generated zone) | 13-14/14 (the strict door check fails now and then: 1-3 doors off) |
+| Zone doors: player 2's doors are in the host's state (open, closed, ajar, locked), a door the host uses changes for player 2, player 2's E on a door runs on the host; player 2's own doors that the host does not have are removed | `dev/test_doors.ps1` (generated zone) | 10-11/11 (placement: 75-100 % of player 2's doors on the host's spots) |
+| Lootable containers (crates, backpacks, cabinets...): player 2 opening one gets the host's items, not its own roll; what player 2 takes is gone on the host, what the host puts in shows up for player 2 | `dev/test_loot.ps1` (generated zone) | 10/10 |
 | Feature switches (`features.txt`) to turn each new part off | manual | - |
 | Seated bodies are lowered into the seat and do not collide with the car; the passenger's camera mirrors the driver's | `rejoincar` | pass |
 
@@ -40,9 +42,9 @@ or the car, in which case they are seated as a passenger). Saved positions and t
 
 - **The world is shared only in part.** In a zone the host's generated content (abandoned cars and their parts,
   props, barrels, containers, signs...) is sent to player 2 by the engine (`worldrep`, see `docs/WORLD_SYNC.md`):
-  player 2 sees what the host sees within 1.5 km. Not yet: opening doors / containers / trunks of abandoned cars
-  (player 2 sees only their own action), physics props may sit a little apart, hazards (landmines are not sent,
-  radiation clouds differ) and weather.
+  player 2 sees what the host sees within 1.5 km; doors and lootable containers are shared. Not yet: trunks of
+  abandoned cars, a few doors still stand off for player 2, physics props may sit a little apart, hazards
+  (landmines are not sent, radiation clouds differ) and weather.
 - **Which parts are installed on the car is not synced** (only their health, fuel, battery): a part taken off or
   put on by one player can look different for the other.
 - **Esc on the host is off while a partner is connected**: the host's pause menu crashed the game natively

@@ -7,3 +7,5 @@ refuel = on      ; player 2's refuel and charge reach the host
 invsave = on     ; player 2's inventory is saved on the host and given back on rejoin
 downed = on      ; down instead of dead, revive (hold E), team death after 60 s
 worldrep = on    ; the host's zone content (abandoned cars, props, barrels) shows up for player 2 (host side)
+doors = on       ; zone doors open / closed as on the host; player 2's E on a door runs on the host
+loot = on        ; crates, backpacks, cabinets hold the host's items; what one player takes is gone for both

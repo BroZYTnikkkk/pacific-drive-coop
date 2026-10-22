@@ -83,7 +83,25 @@ class, same or neighbour 50 uu cell).
     and moves every matching replicated actor every 2 s, also when it comes back into relevance or the engine
     re-applies the attachment. exp107: all doors near both players on the host's spots, extra on the client 616
     of 5075 (12 %).
-- Next: doors and lootable containers on replicated actors (the client's interaction runs on its proxy; the host
+- Placement, later lessons (exp108-119): the fix is an offset relative to the chain root, not a world spot (a
+  prefab root can move after the fix and the content must follow); an immediate parent that is a class component
+  of a replicated actor (`CreationMethod` 0 or 1; the folders' roots are 3) resolves on the client, so no fix;
+  a fix that turns out unneeded is taken back with an "offset -> same offset" entry (the client keeps the latest
+  entry per key); every replicated actor is rechecked in a rolling pass (~1 min); chain roots are always
+  relevant (a child that arrives before its root stays at 0,0,0). Still 1-3 doors off in some runs.
+
+## Doors and lootable containers (worlddoors.lua, worldloot.lua)
+- Doors (`BP_Door_*`, state in `CurrentState` and the door mesh's relative transform; each game randomizes it at
+  BeginPlay): the host sends every door's state when it changes and all of them to a new client; player 2 applies
+  them. Player 2's E (the Highlight interact event, declared on `BP_Door_Single_C` / `BP_Door_Sliding_Single_C`)
+  is sent as `DOOR,<class>,<x,y,z>` and the host calls the same event on its door (the Highlight component and no
+  data are enough). Player 2's own doors that the host does not have (client-generated prefabs) are removed once
+  the host's list is complete and quiet for 20 s. test_doors 11/11.
+- Lootable containers (`BP_Lootable_*`, `InventoryContainer`; filled by `Populate Container`): player 2's own
+  roll is emptied, the host fills its container and sends its items; takes and puts go both ways as count
+  deltas, the trunk's merge rules. test_loot 10/10.
+- Next: trunks of abandoned cars, physics props, hazards, weather, quests.
+- Earlier plan: doors and lootable containers on replicated actors (the client's interaction runs on its proxy; the host
   must do it and send the result), physics props, hazards, the garage (309 runtime actors there are replicated
   too: check that the client has no doubles there).
 

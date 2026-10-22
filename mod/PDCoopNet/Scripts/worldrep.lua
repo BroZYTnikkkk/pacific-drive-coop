@@ -50,19 +50,53 @@ return function(ctx)
         end
         return r, depth
     end
-    -- each newly replicated actor is looked at now and once more 2 host ticks (~10 s) later: a prefab can still
-    -- move or re-attach its content after spawning it (exp104: a door's fix from its spawn moment never matched)
-    local recheck, hostTicks = {}, 0
+    -- every replicated actor is looked at when it is replicated and then again in a rolling pass (RECHECK per host
+    -- tick, all of them in about a minute): a prefab can still move or attach its content later (exp104: a door's
+    -- fix from its spawn moment never matched; exp110: 6 doors attached after a single recheck at 10 s)
+    local RECHECK = 400
+    local tracked, cursor = {}, 1
     local lastFix = {}          -- actor full name -> entry text sent for it
+    local lastEntry = {}        -- actor full name -> { root x, y, z, offset x, y, z, yaw, pitch, roll } of its last fix
+    -- no fix needed (any more): a fix sent before is taken back with an entry "offset -> the same offset" for the
+    -- same root and offset, the client keeps the latest entry per key (exp117: a door got a fix while its parent
+    -- was not replicated yet; once it was, the parent's fix moved it too, twice the offset off)
+    local function retract(key, c, a)
+        local e = lastEntry[key]
+        if not e then return end
+        lastEntry[key] = nil
+        local s = string.format("%d,%d,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.1f", e[1], e[2], e[3], e[4], e[5], e[6],
+            e[4], e[5], e[6], e[7])
+        if math.abs(e[8]) > 0.05 or math.abs(e[9]) > 0.05 then s = s .. string.format(",%.1f,%.1f", e[8], e[9]) end
+        lastFix[key] = ""
+        local w = a:K2_GetActorLocation()
+        fixes[#fixes + 1] = { c = c, s = s, x = w.X, y = w.Y, z = w.Z, sent = false }
+        fixCount = fixCount + 1
+        if c:sub(1, 7) == "BP_Door" then log("WORLDREP placement fix %s %s taken back", c, a:GetFName():ToString()) end
+    end
     local function hostPlacement(a, c)
         local key = a:GetFullName()
-        if not lastFix[key] then recheck[#recheck + 1] = { a = a, c = c, due = hostTicks + 2 } end
+        if not lastFix[key] then tracked[#tracked + 1] = { a = a, c = c } end
         lastFix[key] = lastFix[key] or ""
         local r, depth = rootOf(a)
-        if depth == 0 then return end
+        if depth == 0 then retract(key, c, a); return end
+        -- the chain root always relevant: an attached actor that comes into relevance before its root cannot be
+        -- attached and stays at 0,0,0 on the client (exp118). Roots are few (prefab roots, abandoned cars)
+        pcall(function() if r.bReplicates and not r.bAlwaysRelevant then r.bAlwaysRelevant = true end end)
         local rc = a.RootComponent
         local parent = rc:GetAttachParent()
-        if parent and parent:IsValid() and parent:GetAddress() == r.RootComponent:GetAddress() then return end
+        if parent and parent:IsValid() and parent:GetAddress() == r.RootComponent:GetAddress() then
+            retract(key, c, a); return
+        end
+        -- an immediate parent the client can resolve: a component of a replicated actor that is part of its class
+        -- (CreationMethod Native 0 / construction script 1; the folders' roots are 3, added at runtime). Then the
+        -- client attaches to it with the right offset, and the parent's own fix moves both (exp111: the sliding doors
+        -- hang on BP_PrefabSelfDeletor_* roots, which resolve; a fix computed against the chain root never matched)
+        local okA, resolvable = pcall(function()
+            local o = parent:GetOwner()
+            local cm = parent.CreationMethod
+            return o and o:IsValid() and o.bReplicates and (cm == 0 or cm == 1)
+        end)
+        if okA and resolvable then retract(key, c, a); return end
         K = K or ctx.UEHelpers.GetKismetMathLibrary()
         -- the root as the client gets it: ReplicatedMovement rounds the location to whole units and sends each
         -- rotation axis in 8 bits (360/256 degrees); 1.4 degrees at 13 m is 30 uu (exp105: the last door's fix did
@@ -73,35 +107,50 @@ return function(ctx)
         local function rnd(v) return math.floor(v + 0.5) end
         local rootRot = { Pitch = q(rr.Pitch), Yaw = q(rr.Yaw), Roll = q(rr.Roll) }
         local rootXf = K:MakeTransform({ X = rnd(rl.X), Y = rnd(rl.Y), Z = rnd(rl.Z) }, rootRot, r:GetActorScale3D())
-        local p = K:TransformLocation(rootXf, rc.RelativeLocation)
-        local w = a:K2_GetActorLocation()
-        local wr = a:K2_GetActorRotation()
-        local pr = K:ComposeRotators(rc.RelativeRotation, rootRot)
-        local dr = K:NormalizedDeltaRotator(pr, wr)
-        local dLoc = math.abs(p.X - w.X) + math.abs(p.Y - w.Y) + math.abs(p.Z - w.Z)
+        -- The fix is relative to the chain root, not a world spot: the client's root can still move after the fix
+        -- (a prefab root placed after spawning), and the content must go with it (exp116: a door fixed to its
+        -- world spot moved on with its root, twice the offset off).
+        local w, wr = a:K2_GetActorLocation(), a:K2_GetActorRotation()
+        local wrong, wrongR = rc.RelativeLocation, rc.RelativeRotation
+        local right = K:InverseTransformLocation(rootXf, w)
+        local rightR = K:InverseTransformRotation(rootXf, wr)
+        local dr = K:NormalizedDeltaRotator(wrongR, rightR)
+        local dLoc = math.abs(wrong.X - right.X) + math.abs(wrong.Y - right.Y) + math.abs(wrong.Z - right.Z)
         local dRot = math.abs(dr.Yaw) + math.abs(dr.Pitch) + math.abs(dr.Roll)
-        if dLoc < 3 and dRot < 1 then return end
-        -- "where the client puts it" + the move to the right spot (small numbers) + yaw [+ pitch, roll]
-        local s = string.format("%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.1f", p.X, p.Y, p.Z, w.X - p.X, w.Y - p.Y, w.Z - p.Z, wr.Yaw)
-        if math.abs(wr.Pitch) > 0.05 or math.abs(wr.Roll) > 0.05 then s = s .. string.format(",%.1f,%.1f", wr.Pitch, wr.Roll) end
+        if dLoc < 3 and dRot < 1 then retract(key, c, a); return end
+        -- root spot (as the client gets it), the offset the client gets, the right offset, yaw [, pitch, roll]
+        local s = string.format("%d,%d,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.1f", rnd(rl.X), rnd(rl.Y), rnd(rl.Z),
+            wrong.X, wrong.Y, wrong.Z, right.X, right.Y, right.Z, rightR.Yaw)
+        if math.abs(rightR.Pitch) > 0.05 or math.abs(rightR.Roll) > 0.05 then
+            s = s .. string.format(",%.1f,%.1f", rightR.Pitch, rightR.Roll)
+        end
         if s == lastFix[key] then return end
+        if c:sub(1, 7) == "BP_Door" then
+            log("WORLDREP placement fix %s %s: offset %.0f,%.0f,%.0f -> %.0f,%.0f,%.0f under %s%s", c, a:GetFName():ToString(),
+                wrong.X, wrong.Y, wrong.Z, right.X, right.Y, right.Z, r:GetFName():ToString(),
+                lastFix[key] ~= "" and " (changed)" or "")
+        end
         lastFix[key] = s
+        lastEntry[key] = { rnd(rl.X), rnd(rl.Y), rnd(rl.Z), wrong.X, wrong.Y, wrong.Z, wrongR.Yaw, wrongR.Pitch, wrongR.Roll }
         fixes[#fixes + 1] = { c = c, s = s, x = w.X, y = w.Y, z = w.Z, sent = false }
         fixCount = fixCount + 1
     end
     local function hostRecheck()
-        hostTicks = hostTicks + 1
-        local keep, n = {}, 0
-        for _, e in ipairs(recheck) do
-            if e.due > hostTicks then keep[#keep + 1] = e
-            elseif valid(e.a) then
+        local n, done = 0, 0
+        while done < RECHECK and #tracked > 0 do
+            if cursor > #tracked then cursor = 1 end
+            local e = tracked[cursor]
+            if valid(e.a) then
                 local before = fixCount
                 pcall(hostPlacement, e.a, e.c)
                 if fixCount > before then n = n + 1 end
+                cursor = cursor + 1
+            else
+                table.remove(tracked, cursor)
             end
+            done = done + 1
         end
-        recheck = keep
-        if n > 0 then log("WORLDREP placement: %d actor(s) moved after spawning, fixes updated", n) end
+        if n > 0 then log("WORLDREP placement: %d actor(s) moved since they were replicated, fixes updated", n) end
     end
     local function remotePlayers()
         local keys, at = {}, {}
@@ -153,8 +202,9 @@ return function(ctx)
         log("WORLDREP placement: %d message(s), %d bytes (%d fixes known)", msgs, bytes, fixCount)
     end
 
-    local FIXCELL = 50
-    local fixedOnClient = {}    -- client actor full name -> true
+    -- client: entries by class and the offset the client got (20 uu cells), checked against the root's spot
+    local FIXCELL = 20
+    local fixedOnClient = {}    -- client actor full name -> { right offset x, y, z, again = n }
     local function fixKey(c, x, y, z) return string.format("%s|%d|%d|%d", c, math.floor(x / FIXCELL), math.floor(y / FIXCELL), math.floor(z / FIXCELL)) end
     ctx.hostMsgHandlers["WFIXRESET"] = function() fixes, fixedOnClient, fixCount = {}, {}, 0 end
     ctx.hostMsgHandlers["WFIX"] = function(rest)
@@ -165,10 +215,10 @@ return function(ctx)
                 for e in body:gmatch("[^;]+") do
                     local v = {}
                     for num in e:gmatch("[^,]+") do v[#v + 1] = tonumber(num) end
-                    if #v == 7 or #v == 9 then
-                        -- stored as px, py, pz, wx, wy, wz, pitch, yaw, roll
-                        local r = { v[1], v[2], v[3], v[1] + v[4], v[2] + v[5], v[3] + v[6], v[8] or 0, v[7], v[9] or 0 }
-                        local k = fixKey(c, r[1], r[2], r[3])
+                    if #v == 10 or #v == 12 then
+                        -- root x, y, z; offset got x, y, z; right offset x, y, z; pitch, yaw, roll
+                        local r = { v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[11] or 0, v[10], v[12] or 0 }
+                        local k = fixKey(c, r[4], r[5], r[6])
                         fixes[k] = fixes[k] or {}
                         table.insert(fixes[k], r)
                         n = n + 1
@@ -178,40 +228,65 @@ return function(ctx)
         end
         fixCount = fixCount + n
     end
-    -- client: move replicated actors that sit where the host said the engine would put them
+    -- client: give replicated attached actors the host's offset to their chain root, where the root and the offset
+    -- the engine gave them match what the host predicted
     local function clientPlacement()
         if fixCount == 0 then return 0 end
         local moved = 0
         for _, a in ipairs(FindAllOf("Actor") or {}) do
             if valid(a) then
                 local okR, role = pcall(function() return a.Role end)
-                if okR and role == 1 then
+                local okP, parent = pcall(function() return a:GetAttachParentActor() end)
+                if okR and role == 1 and okP and parent and parent:IsValid() then
                     local name = a:GetFullName()
-                    local l = a:K2_GetActorLocation()
-                    local put = fixedOnClient[name]
-                    -- moved again since (the engine re-applies the attachment when it changes on the host)?
-                    if put and math.abs(put[1] - l.X) + math.abs(put[2] - l.Y) + math.abs(put[3] - l.Z) > 3 then
-                        put = nil
+                    local rc = a.RootComponent
+                    local l = rc.RelativeLocation
+                    local rec = fixedOnClient[name]
+                    local function near(v, i) return math.abs(v[i] - l.X) + math.abs(v[i + 1] - l.Y) + math.abs(v[i + 2] - l.Z) <= 3 end
+                    -- the offset the engine gave it: remembered; if it is neither that nor the one put here, the
+                    -- engine gave a new one (the host changed the attachment)
+                    if not rec then rec = { orig = { l.X, l.Y, l.Z }, again = 0 }; fixedOnClient[name] = rec
+                    elseif not near(rec.orig, 1) and not (rec.applied and near(rec.applied, 7)) then
+                        rec.orig = { l.X, l.Y, l.Z }; rec.applied = nil; rec.again = rec.again + 1
                     end
-                    if not put then
+                    local o = rec.orig
+                    if not rec.keys or rec.keysFor ~= o then
+                        -- the 27 cells around the offset, computed once per offset (4000 actors every 2 s)
                         local c = a:GetClass():GetFName():ToString()
-                        local best, bestD, bestList, bestI = nil, 8, nil, nil
+                        rec.keys, rec.keysFor = {}, o
                         for dx = -1, 1 do for dy = -1, 1 do for dz = -1, 1 do
-                            local list = fixes[fixKey(c, l.X + dx * FIXCELL, l.Y + dy * FIXCELL, l.Z + dz * FIXCELL)]
-                            if list then
-                                for i, v in ipairs(list) do
-                                    local d = math.abs(v[1] - l.X) + math.abs(v[2] - l.Y) + math.abs(v[3] - l.Z)
-                                    -- <=: of two fixes for one spot the later one (the host's recheck) wins
-                                    if d <= bestD then best, bestD, bestList, bestI = v, d, list, i end
-                                end
-                            end
+                            rec.keys[#rec.keys + 1] = fixKey(c, o[1] + dx * FIXCELL, o[2] + dy * FIXCELL, o[3] + dz * FIXCELL)
                         end end end
-                        if best then
-                            local okM = pcall(function()
-                                a:K2_SetActorLocationAndRotation({ X = best[4], Y = best[5], Z = best[6] },
-                                    { Pitch = best[7], Yaw = best[8], Roll = best[9] }, false, {}, true)
-                            end)
-                            if okM then fixedOnClient[name] = { best[4], best[5], best[6] }; moved = moved + 1 end
+                    end
+                    local root = rootOf(a)
+                    local rl = root:K2_GetActorLocation()
+                    local best, bestD = nil, 6
+                    for _, k in ipairs(rec.keys) do
+                        local list = fixes[k]
+                        if list then
+                            for _, v in ipairs(list) do
+                                local dRoot = math.abs(v[1] - rl.X) + math.abs(v[2] - rl.Y) + math.abs(v[3] - rl.Z)
+                                local d = math.abs(v[4] - o[1]) + math.abs(v[5] - o[2]) + math.abs(v[6] - o[3])
+                                -- <=: of two entries for one offset the later one (a recheck, a retraction) wins
+                                if dRoot < 10 and d <= bestD then best, bestD = v, d end
+                            end
+                        end
+                    end
+                    -- apply when the latest entry is not what is in place (new, changed, taken back, or the engine
+                    -- reset the offset); an actor whose offset keeps changing (physics here) is left after 3 times
+                    if best and rec.again < 3 and (best ~= rec.applied or not near(best, 7)) then
+                        local okM = pcall(function()
+                            rc:K2_SetRelativeLocationAndRotation({ X = best[7], Y = best[8], Z = best[9] },
+                                { Pitch = best[10], Yaw = best[11], Roll = best[12] }, false, {}, true)
+                        end)
+                        if okM then
+                            if rec.applied == best and not rec.told then
+                                rec.told = true
+                                log("WORLDREP client: %s lost its fixed offset, set again", name:match("[^.:]+$") or name)
+                            end
+                            if rec.applied == best then rec.again = rec.again + 1 end
+                            rec.applied = best
+                            moved = moved + 1
                         end
                     end
                 end
@@ -222,7 +297,7 @@ return function(ctx)
 
     function M.reset()
         seen, total, fixes, fixCount, sentKey, fixedOnClient = {}, 0, {}, 0, "", {}
-        recheck, hostTicks, lastFix = {}, 0, {}
+        tracked, cursor, lastFix, lastEntry = {}, 1, {}, {}
     end
 
     -- Client: some prefabs (roads, shrubs, fences under a PrefabSettingsActor) are built by the client game too, in

@@ -44,6 +44,8 @@ Switch the part off and keep playing: in `<game>\PenDriverPro\Binaries\Win64\ue4
 | the friend's inventory is wrong after rejoining | `invsave` |
 | dying / reviving misbehaves | `downed` |
 | lag or crashes in a zone, doubled cars / props for the friend | `worldrep` (on the host) |
+| doors open by themselves or will not open | `doors` |
+| items in crates / backpacks vanish or double | `loot` |
 
 ## What to send back
 

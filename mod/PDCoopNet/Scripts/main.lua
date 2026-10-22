@@ -32,9 +32,10 @@ local ROLE, ARG, SCENARIO = readRole()
 -- itemstate (item fuel/charge/durability/health over the network), trunk (shared trunk), carstate (car part
 -- health/fuel/battery follow the host), refuel (player 2's refuel/charge reach the host), invsave (player 2's
 -- inventory saved on the host), downed (down instead of dead, revive, team death), worldrep (the host's generated
--- zone content: abandoned cars, props, barrels... replicated to player 2).
+-- zone content: abandoned cars, props, barrels... replicated to player 2), doors (zone doors open / closed as on
+-- the host, player 2's E on a door runs on the host), loot (lootable containers hold the host's items).
 local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true,
-                   worldrep = true }
+                   worldrep = true, doors = true, loot = true }
 do
     local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
     if f then
@@ -787,6 +788,26 @@ local WorldRep = require("worldrep")({
     hostMsgHandlers = hostMsgHandlers,
 })
 
+-- lootable containers hold the host's items (worldloot.lua)
+local WorldLoot = require("worldloot")({
+    log = log, valid = valid, CarSync = CarSync,
+    enabled = function() return feature("loot") end,
+    role = function() return ROLE end,
+    sendCommand = function(cmd) sendCommand(cmd) end,
+    hostSend = function(payload) hostSend(payload) end,
+    hostMsgHandlers = hostMsgHandlers,
+})
+
+-- zone doors follow the host (worlddoors.lua)
+local WorldDoors = require("worlddoors")({
+    log = log, valid = valid,
+    enabled = function() return feature("doors") end,
+    role = function() return ROLE end,
+    sendCommand = function(cmd) sendCommand(cmd) end,
+    hostSend = function(payload) hostSend(payload) end,
+    hostMsgHandlers = hostMsgHandlers,
+})
+
 -- the world items of this machine: list of { actor, id, arch, x, y, z, p, yw, r }
 local function scanWorldItems()
     local out = {}
@@ -1090,7 +1111,8 @@ local function hostCommandsTick()
         if valid(car) and kind == "SEAT" then seatPassenger(rc.pc, car)
         elseif valid(car) and kind == "UNSEAT" then unseatPassenger(rc.pc, car)
         elseif kind == "PICKUP" or kind == "DROP" then hostItemCommand(kind, args, rc.pc)
-        elseif not CarSync.hostCommand(kind, args, rc.pc) and not Downed.hostCommand(kind, args, rc.pc) then
+        elseif not CarSync.hostCommand(kind, args, rc.pc) and not Downed.hostCommand(kind, args, rc.pc)
+            and not WorldDoors.hostCommand(kind, args) and not WorldLoot.hostCommand(kind, args) then
             log("CMD unknown %s", tostring(kind))
         end
     end
@@ -1678,6 +1700,8 @@ local function resetPerMapState(newWorld)
     mapTicks = 0
     pcall(Downed.mapChanged, newWorld)
     pcall(WorldRep.reset)
+    pcall(WorldDoors.reset)
+    pcall(WorldLoot.reset)
     -- one re-host per ARRIVAL, not per map name: after a team death the host comes back to RB_Garage, which it had
     -- already re-hosted earlier in the session, and was left without a listen server (playtest 2026-10-21: player 2
     -- could not rejoin until the host pressed F8). No loop: after the re-host the world is not standalone.
@@ -1971,6 +1995,20 @@ LoopInGameThreadWithDelay(200, function()
                 okD, errD = pcall(Downed.hostAfterDeathTick)
                 if not okD then log("downed error: %s", tostring(errD)) end
             end
+            -- doors: find them every 5 s, state every second
+            local okW, errW = true, nil
+            if fastTick % 25 == 13 then okW, errW = pcall(WorldDoors.discover) end
+            if okW and fastTick % 5 == 2 then
+                okW, errW = pcall(ROLE == "host" and WorldDoors.hostTick or WorldDoors.clientTick)
+            end
+            if not okW then log("doors error: %s", tostring(errW)) end
+            -- lootable containers: hooks every 5 s, changes every second
+            okW, errW = true, nil
+            if fastTick % 25 == 17 then okW, errW = pcall(WorldLoot.discover) end
+            if okW and fastTick % 5 == 4 then
+                okW, errW = pcall(ROLE == "host" and WorldLoot.hostTick or WorldLoot.clientTick)
+            end
+            if not okW then log("loot error: %s", tostring(errW)) end
         end
     end
     if ROLE == "host" then

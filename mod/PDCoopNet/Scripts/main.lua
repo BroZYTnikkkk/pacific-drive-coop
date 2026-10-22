@@ -71,6 +71,15 @@ local function valid(o)
     return not (ok and dead)
 end
 local function className(o) return o:GetClass():GetFName():ToString() end
+-- the item instance of an item actor, or nil: a pooled (returned) item actor has none, and reading a field of the
+-- missing instance crashes natively (access violation at 0x18, dev session 2026-10-22), which pcall cannot catch
+local function instanceOf(actor)
+    if actor == nil or not actor:IsValid() then return nil end
+    local inst = nil
+    pcall(function() inst = actor.Instance end)
+    if inst == nil or not inst:IsValid() then return nil end
+    return inst
+end
 local function objName(o) return valid(o) and o:GetFName():ToString() or "nil" end
 
 local function inGameplayMap()
@@ -268,7 +277,7 @@ local function dumpLoot(tagText)
             else
                 n = n + 1
                 local arch = "?"
-                pcall(function() arch = a.Instance.Archetype:GetFName():ToString() end)
+                pcall(function() local i = instanceOf(a); if i then arch = i.Archetype:GetFName():ToString() end end)
                 local rep = "?"
                 pcall(function() rep = tostring(a.bReplicates); if a.bReplicates then reps = reps + 1 end end)
                 byArch[arch] = (byArch[arch] or 0) + 1
@@ -287,7 +296,7 @@ local function dumpItemsDetailed(tagText)
         if valid(a) then
             n = n + 1
             local arch, pooled, hidden, inst = "?", "?", "?", "?"
-            pcall(function() arch = a.Instance.Archetype:GetFName():ToString() end)
+            pcall(function() local i = instanceOf(a); if i then arch = i.Archetype:GetFName():ToString() end end)
             pcall(function() pooled = tostring(a:IsPooled()) end)
             pcall(function() hidden = tostring(a.bHidden) end)
             pcall(function() inst = objName(a.Instance) end)
@@ -736,6 +745,8 @@ local ItemState = require("itemstate")({ log = log, valid = valid, feature = fea
 -- shared trunk, car part state, player 2's inventory saved on the host (carsync.lua)
 local CarSync = require("carsync")({
     ItemState = ItemState, feature = feature,
+    role = function() return ROLE end,
+    myPlayerId = function() return myPlayerId() end,
     log = log, valid = valid, UEHelpers = UEHelpers, objName = objName, CHAN_MAX = CHAN_MAX,
     hostSend = function(payload) hostSend(payload) end,
     hostSendLatest = function(payload) hostSendLatest(payload) end,
@@ -747,6 +758,7 @@ local CarSync = require("carsync")({
 -- down instead of dead, revive, team death (downed.lua)
 local Downed = require("downed")({
     log = log, valid = valid, UEHelpers = UEHelpers,
+    isMine = function(ch) return isMyCharacter(ch) end,
     enabled = function() return feature("downed") end,
     role = function() return ROLE end,
     localController = function() return localController() end,
@@ -861,7 +873,9 @@ local function hostItemCommand(kind, args, pc)
     if kind == "PICKUP" then
         local e = hostKnown[args]
         if e and valid(e.actor) then
-            local ok, res = pcall(function() return e.actor.Instance:Remove(true) end)
+            local inst = instanceOf(e.actor)
+            local ok, res = false, "item already gone"
+            if inst then ok, res = pcall(function() return inst:Remove(true) end) end
             log("ITEMSYNC PICKUP by %s: removed host item %s (%s) ok=%s", objName(pc), args, e.arch, tostring(ok and res))
         else
             log("ITEMSYNC PICKUP by %s: host item %s not found", objName(pc), args)
@@ -871,10 +885,18 @@ local function hostItemCommand(kind, args, pc)
         local a = arch and archLoad(arch)
         local inv = FindFirstOf("InventorySystem")
         if a and valid(inv) then
+            -- a spawned item does not simulate until something touches it, so player 2's drop (reported at hand
+            -- height) hung in the air for both (playtest 2026-10-21). Put it at the feet of player 2's character.
+            -- (Turning its physics on instead crashed the host a few seconds later, twice, dev session 2026-10-22.)
+            pcall(function()
+                local feet = pc.Pawn:K2_GetActorLocation().Z - 70
+                if tonumber(z) > feet then z = tostring(feet) end
+            end)
             local xf = UEHelpers.GetKismetMathLibrary():MakeTransform({ X = tonumber(x), Y = tonumber(y), Z = tonumber(z) },
                 { Pitch = tonumber(pi), Yaw = tonumber(yw), Roll = tonumber(r) }, { X = 1, Y = 1, Z = 1 })
             local ok, act = pcall(function() return inv:SpawnItemActor(UEHelpers.GetWorldContextObject(), xf, a, 0, 0) end)
             if ok and valid(act) and st and st ~= "" then ItemState.write(act.Instance, st, arch) end
+
             log("ITEMSYNC DROP by %s: spawned %s (%s) on the host ok=%s %s", objName(pc), arch, st or "", tostring(ok), ok and objName(act) or tostring(act))
         else
             log("ITEMSYNC DROP by %s: cannot spawn %s", objName(pc), tostring(arch))
@@ -891,7 +913,10 @@ local function mirrorRemove(id)
     mirror[id] = nil
     if not m then return end
     mirrorByActor[m.actorName] = nil
-    if valid(m.actor) then pcall(function() m.actor.Instance:Remove(true) end) end
+    if valid(m.actor) and m.actor:GetFullName() == m.actorName then
+        local inst = instanceOf(m.actor)
+        if inst then pcall(function() inst:Remove(true) end) end
+    end
 end
 
 local function mirrorSpawn(id, arch, x, y, z, pi, yw, r, st)
@@ -929,7 +954,8 @@ hostMsgHandlers["ITEMS"] = function(rest)
         elseif kind == "S" then
             local id, st = op:match("^S,([^,]+),([%w_.%-]*)$")
             local m = id and mirror[id]
-            if m and valid(m.actor) then ItemState.write(m.actor.Instance, st, id) end
+            local inst = m and instanceOf(m.actor)
+            if inst then ItemState.write(inst, st, id) end
         elseif kind == "M" then
             local id, x, y, z, pi, yw, r = op:match("^M,([^,]+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+),(-?%d+)$")
             local m = id and mirror[id]
@@ -956,7 +982,8 @@ local function clientItemsTick()
     local myLoc = valid(myPawn) and myPawn:K2_GetActorLocation() or nil
     -- 1) mirrors that disappeared without a host DEL were picked up (or used) by this player
     for id, m in pairs(mirror) do
-        local gone = not valid(m.actor)
+        -- the same full name too: a destroyed and collected actor's slot can hold another object later
+        local gone = not (valid(m.actor) and m.actor:GetFullName() == m.actorName)
         local grabbed = false
         if not gone then
             local ok, still = pcall(function()
@@ -1000,7 +1027,8 @@ local function clientItemsTick()
             else
                 purged = purged + 1
             end
-            pcall(function() e.actor.Instance:Remove(true) end)
+            local inst = instanceOf(e.actor)
+            if inst then pcall(function() inst:Remove(true) end) end
         end
     end
     if purged + dropped > 0 then log("ITEMSYNC client removed %d local items, sent %d drops", purged, dropped) end
@@ -1334,6 +1362,14 @@ local function clientCarTick()
     end
     if valid(parent) then
         rideTicks = rideTicks + 1
+        -- player 2 rides with a free camera (owner's rule): in the new-game intro its game locked the look input
+        -- and sat it in the driver's seat (playtest 2026-10-21)
+        pcall(function()
+            if pc:IsLookInputIgnored() then
+                pc:ResetIgnoreLookInput()
+                log("RIDE look input was locked (cutscene?): unlocked")
+            end
+        end)
         if rideTicks <= 3 then
             local cm = managers()
             local oob, water, pct, carState = "?", "?", "?", "?"
@@ -1359,6 +1395,38 @@ local function clientCarTick()
         log("DROPTEST riding for %d s, disconnecting on purpose", rideTicks * 5)
         console("disconnect")
     end
+end
+
+-- Player 2 pressing E at the car: its game runs CommandEnterCar locally and seats it in the driver's seat of its
+-- copy of the car, with no way out (playtest 2026-10-21; reproduced in a dev session: attached to the car, driver's
+-- view). The client undoes that with the game's own Exit Car and asks the host to seat it as passenger (SEAT);
+-- pressing E again while riding asks to get out (UNSEAT). Player 2 is always the passenger.
+local enterHookDone = false
+local function registerEnterCarHook()
+    if enterHookDone or ROLE ~= "client" then return end
+    local any = FindFirstOf(CHARACTER_CLASS)
+    if not valid(any) then return end
+    enterHookDone = true
+    local cls = any:GetClass():GetFullName():match("%s(%S+)$")
+    local ok, err = pcall(function()
+        RegisterHook(cls .. ":CommandEnterCar", function(ctx)
+            local ch = ctx:get()
+            if not valid(ch) or not isMyCharacter(ch) then return end
+            local wasRiding = clientSeated
+            ExecuteInGameThreadWithDelay(600, function()
+                if not valid(ch) then return end
+                local okX, errX = pcall(function() callBPFunction(ch, "Exit Car", false, false) end)
+                if wasRiding then
+                    sendCommand("UNSEAT")
+                    log("ENTERCAR E while riding: local enter undone (ok=%s), UNSEAT sent", tostring(okX))
+                else
+                    sendCommand("SEAT")
+                    log("ENTERCAR E at the car: local enter undone (ok=%s %s), SEAT sent", tostring(okX), okX and "" or tostring(errX))
+                end
+            end)
+        end)
+    end)
+    log("ENTERCAR hook %s ok=%s %s", cls .. ":CommandEnterCar", tostring(ok), ok and "" or tostring(err))
 end
 
 local function nudgeHostPawn()
@@ -1588,6 +1656,7 @@ local function clientRejoinTick(worldName)
     ExecuteInGameThreadWithDelay(300, function() applyNetTimeouts("pending") end)
 end
 local gmLogged = false
+local rehostedFor = {}       -- world name -> true (one re-host per arrival)
 local function resetPerMapState(newWorld)
     log("MAPCHANGE %s -> %s", tostring(lastWorld), tostring(newWorld))
     lastWorld = newWorld
@@ -1598,6 +1667,10 @@ local function resetPerMapState(newWorld)
     gmLogged = false
     mapTicks = 0
     pcall(Downed.mapChanged, newWorld)
+    -- one re-host per ARRIVAL, not per map name: after a team death the host comes back to RB_Garage, which it had
+    -- already re-hosted earlier in the session, and was left without a listen server (playtest 2026-10-21: player 2
+    -- could not rejoin until the host pressed F8). No loop: after the re-host the world is not standalone.
+    rehostedFor = {}
 end
 
 local function hookLogger(path)
@@ -1622,7 +1695,62 @@ end
 -- ---------------------------------------------------------------- re-host after the game's own travel
 local coopActive = false     -- the host has had remote players in this session
 local hostingEnabled = false -- play: the host pressed F8
-local rehostedFor = {}       -- world name -> true (one re-host per arrival)
+-- rehostedFor is declared above resetPerMapState, which clears it on every arrival
+
+-- No world pause while players are connected. The host crashed natively (EXCEPTION_ACCESS_VIOLATION reading 0x178,
+-- no Lua in the stack) when pressing Esc while driving, three times in the playtest of 2026-10-21, and the client
+-- hung. Reproduced 2026-10-22 in a dev session: pausing and then unpausing the world with a client connected
+-- crashes with the same address. So the world is never paused while a client is connected: a pre-hook on the
+-- native SetGamePaused turns "pause" into "no pause" (the pause menu still opens, the world keeps running, as in
+-- other online games).
+local pauseHookDone = false
+local function registerPauseHook()
+    if pauseHookDone or ROLE ~= "host" then return end
+    pauseHookDone = true
+    local path = "/Script/Engine.GameplayStatics:SetGamePaused"
+    local ok, err = pcall(function()
+        RegisterHook(path, function(_, _, paused)
+            local want = false
+            pcall(function() want = paused:get() end)
+            if not want then return end
+            local remote = false
+            for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+                if valid(pc) and not pc:IsLocalController() then remote = true end
+            end
+            if not remote then return end
+            pcall(function() paused:set(false) end)
+            log("PAUSE players connected: the world is not paused (menu open)")
+        end)
+    end)
+    log("PAUSE hook %s ok=%s %s", path, tostring(ok), ok and "" or tostring(err))
+    -- Not enough: opening the pause menu itself still crashed the host with the same address after an earlier
+    -- open/close (dev session 2026-10-22, world not paused). While a client is connected the host's pause menu
+    -- does not open (CanOpenPauseMenu answers no); a message says why.
+    for _, cpath in ipairs({
+        "/Game/Systems/Controller/BP_PlayerController_MainCharacter.BP_PlayerController_MainCharacter_C:CanOpenPauseMenu",
+        "/Game/Systems/Controller/BP_Controller_PlayerCar.BP_Controller_PlayerCar_C:CanOpenPauseMenu",
+    }) do
+        local okC, errC = pcall(function()
+            RegisterHook(cpath, function(_, canPause)
+                local remote = false
+                for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+                    if valid(pc) and not pc:IsLocalController() then remote = true end
+                end
+                if not remote then return end
+                pcall(function() canPause:set(false) end)
+                local wl = FindFirstOf("UMG_Feedback_WarningList_C")
+                if valid(wl) then
+                    pcall(function()
+                        wl:SetVisibility(4)
+                        wl["Add Message"](wl, FText("Co-op: the pause menu is off while your partner is connected (it crashes the game)."), 1, FName("PDCoopPause"), nil)
+                    end)
+                end
+                log("PAUSE menu blocked: a partner is connected")
+            end)
+        end)
+        log("PAUSE menu hook %s ok=%s %s", cpath, tostring(okC), okC and "" or tostring(errC))
+    end
+end
 local function worldPackagePath(world)
     local full = world:GetFullName()            -- "World /Game/Maps/X/Y.Y"
     return (full:match("%s(%S+)%.") or full:match("%s(%S+)$"))
@@ -1813,6 +1941,9 @@ elseif ROLE == "client" then
     RegisterKeyBind(Key.F6, onGameThread(function() sendCommand("SEAT") end))
     RegisterKeyBind(Key.F7, onGameThread(function() sendCommand("UNSEAT") end))
 end
+-- E also counts for the revive (a fallback if the game does not report it as held); only a timestamp here,
+-- the key hook runs outside the game thread
+RegisterKeyBind(Key.E, function() Downed.keyPressed() end)
 
 LoopInGameThreadWithDelay(200, function()
     fastTick = fastTick + 1
@@ -1821,6 +1952,8 @@ LoopInGameThreadWithDelay(200, function()
         local okB, errB = pcall(updateBodies)
         if not okB then log("bodies error: %s", tostring(errB)) end
         if ROLE == "host" or ROLE == "client" then
+            local okL, errL = pcall(CarSync.lockTick)
+            if not okL then log("trunklock error: %s", tostring(errL)) end
             local okD, errD = pcall(Downed.tick, 0.2)
             if not okD then log("downed error: %s", tostring(errD)) end
             if ROLE == "host" and fastTick % 5 == 1 then
@@ -1893,6 +2026,7 @@ LoopInGameThreadWithDelay(5000, function()
         end
         if ROLE == "host" then
             step("rehost", function() hostRehostTick(worldName) end)
+            step("pausehook", registerPauseHook)
             if SCENARIO == "gametravel" or SCENARIO == "lootprobe" then step("gametravel", function() hostGameTravelTick(worldName) end) end
         end
         if ROLE == "client" then step("rejoin", function() clientRejoinTick(worldName) end) end
@@ -1914,6 +2048,7 @@ LoopInGameThreadWithDelay(5000, function()
             step("dedupe", dedupeCar)
             if SCENARIO == "loot" then step("loottest", clientLootTestTick) end
             step("seathook", registerSeatHook)
+            step("enterhook", registerEnterCarHook)
             local bound = false
             step("bind", function() bound = bindClientCharacter() end)
             if tick >= 30 then step("report", reportLocalReplicatedActorsOnce) end

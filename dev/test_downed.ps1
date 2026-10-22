@@ -26,6 +26,16 @@ $early | Select-Object -First 4 | ForEach-Object { Write-Output "  early: $($_.L
 Dev "client1" "heal" | Out-Null
 Dev "client2" "heal" | Out-Null
 
+# 0) each player has its own health: hits on the other player's character on this machine change nothing here
+$r = Dev "client1" "hitother 2"
+$checks["host: hits on player 2's character do not take the host's health ($r)"] = $r -match "my health 100\.0 -> 100\.0"
+$r = Dev "client2" "hitother 2"
+$checks["player 2: hits on the host's character do not take player 2's health ($r)"] = $r -match "my health 100\.0 -> 100\.0"
+$r = Dev "client1" "hurt 30"
+$h2 = [double](Dev "client2" "lua return res('PlayerHealth').Current")
+$checks["the host takes 30 damage, player 2 keeps its health ($h2)"] = $h2 -ge 99
+Dev "client1" "heal" | Out-Null
+
 # 1) player 2 goes down instead of dying; the host revives without first aid -> 20 %
 $r = Dev "client2" "lethal 2"
 Start-Sleep 3

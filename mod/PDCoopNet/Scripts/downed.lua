@@ -59,9 +59,18 @@ return function(ctx)
     end
 
     -- ------------------------------------------------------------ local player
+    -- down: no walking and no jumping (playtest: the downed friend could still jump)
     local function setMovementLocked(locked)
         local pc = localPc()
         if valid(pc) then pcall(function() pc:SetIgnoreMoveInput(locked) end) end
+        local ch = nil
+        pcall(function() ch = pc.Pawn end)
+        if valid(ch) then
+            pcall(function()
+                local mv = ch.CharacterMovement
+                if locked then mv:DisableMovement() else mv:SetMovementMode(1, 0) end   -- 1 = walking
+            end)
+        end
     end
     local function goDown()
         if me.down then return end
@@ -87,7 +96,18 @@ return function(ctx)
         me.tries = me.tries + 1
         if not StaticFindObject(LIFESAVER) then return end
         local ok, err = pcall(function()
-            RegisterHook(LIFESAVER, function(_, incoming, updated)
+            RegisterHook(LIFESAVER, function(selfp, incoming, updated)
+                -- Player health is one resource per process (BP_ResourceManager.PlayerHealth), but every machine has
+                -- two characters, each with this receiver: damage to the other player's character here (a fall seen
+                -- through replicated movement, a hit) was taken from this player's health ("one HP for two",
+                -- playtest 2026-10-21). That character's own machine computes its damage; here it takes none.
+                local recv, owner = nil, nil
+                pcall(function() recv = selfp:get() end)
+                pcall(function() owner = recv:GetOwner() end)
+                if valid(owner) and not ctx.isMine(owner) then
+                    pcall(function() updated:set(0) end)
+                    return
+                end
                 if not ctx.enabled() then return end
                 if me.dying then
                     -- player 2 must not die in its own game while the team death runs (it would leave the session);
@@ -285,6 +305,9 @@ return function(ctx)
         end
         local holding = false
         pcall(function() holding = pc:IsInputKeyDown({ KeyName = FName(REVIVE_KEY) }) end)
+        -- fallback if the game does not report the key as held: every press of E (UE4SS key hook, main.lua)
+        -- counts for 0.6 s, so holding or tapping E both work
+        if not holding and M.lastKeyPress and clock() - M.lastKeyPress < 0.6 then holding = true end
         -- dev tools (PDCoopDev "holdrevive on") stand in for the key in automated tests
         if not holding then pcall(function() holding = ModRef:GetSharedVariable("PDCoopDev_HoldRevive") == true end) end
         if best and holding then
@@ -306,6 +329,8 @@ return function(ctx)
 
     -- uses one first aid item of this player; true if there was one
     local FIRST_AID = "/Game/Gameplay/Inventory/GenericItemProperties/IP_FirstAid.IP_FirstAid"
+    function M.keyPressed() M.lastKeyPress = clock() end
+
     function M.useFirstAid()
         local st = StaticFindObject(FIRST_AID)
         local im = FindFirstOf("BP_InventoryManager_C")
@@ -337,8 +362,8 @@ return function(ctx)
     end
 
     function M.tick(dt)
+        registerHooks()          -- always: the hook also keeps damage of the other character off this player's health
         if not ctx.enabled() then return end
-        registerHooks()
         if ctx.role() == "host" then
             if host.dyingSince then return end
             -- a downed player who left the session is no longer down here (no team death for an empty seat)

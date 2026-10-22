@@ -590,6 +590,25 @@ commands.holdrevive = function(a)
     ModRef:SetSharedVariable("PDCoopDev_HoldRevive", v)
     return "holdrevive " .. tostring(v)
 end
+-- hitother [n]: n hits of 30 on the OTHER player's character here (its receiver on this machine); with the fix
+-- for "one HP for two" this player's health must not change
+commands.hitother = function(a)
+    local cls_ = StaticFindObject("/Game/Systems/Messages/MSG_Damage_Physical.MSG_Damage_Physical_C")
+        or LoadAsset("/Game/Systems/Messages/MSG_Damage_Physical.MSG_Damage_Physical_C")
+    local me = H.me()
+    local other = nil
+    for _, ch in ipairs(H.find("PDP_MainCharacter_C")) do
+        if not (valid(me) and ch:GetFullName() == me:GetFullName()) then other = ch end
+    end
+    if not (valid(other) and cls_) then return "no other character" end
+    local h0 = H.res("PlayerHealth").Current
+    for _ = 1, tonumber(a[1]) or 1 do
+        local m = StaticConstructObject(cls_, H.invsys())
+        m.Damage = 30
+        pcall(function() other.AC_PlayerHealthReceiverHelper:MessageBind_MSG_Base_Damage_C(m, other, other) end)
+    end
+    return string.format("hit %s: my health %.1f -> %.1f", H.name(other), h0, H.res("PlayerHealth").Current)
+end
 -- lethal [n]: n lethal hits through the game's player damage path (AC_PlayerHealthReceiverHelper)
 commands.lethal = function(a)
     local cls_ = StaticFindObject("/Game/Systems/Messages/MSG_Damage_Physical.MSG_Damage_Physical_C")
@@ -624,7 +643,11 @@ end
 local function worldItems(filter)
     local r = {}
     for _, x in ipairs(H.find("ItemWorldManifestation")) do
-        local okA, an = pcall(function() return x.Instance.Archetype:GetFName():ToString() end)
+        -- a pooled item actor has no instance: reading its fields crashed the host natively (2026-10-22)
+        local inst = nil
+        pcall(function() inst = x.Instance end)
+        local okA, an = false, nil
+        if inst ~= nil and inst:IsValid() then okA, an = pcall(function() return inst.Archetype:GetFName():ToString() end) end
         local okC, ctx = pcall(function() return x:K2_GetActorContext() end)
         if okA and okC and ctx == 0 and (not filter or an:lower():find(filter:lower(), 1, true)) then r[#r + 1] = { actor = x, arch = an } end
     end

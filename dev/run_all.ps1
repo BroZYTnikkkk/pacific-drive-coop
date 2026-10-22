@@ -7,6 +7,8 @@ param(
 $tools = Join-Path (Split-Path $PSScriptRoot) "tools"
 if (-not (Test-Path "$tools\run_test.ps1")) { $tools = Join-Path $Root "tools" }
 $runs = @(
+    @{ n = "session";   cmd = { & powershell -NoProfile -File "$PSScriptRoot\test_session.ps1" -Name "$Prefix-session" -Root $Root } },
+    @{ n = "gametravel"; cmd = { & powershell -NoProfile -File "$tools\run_test.ps1" -Name "$Prefix-gametravel" -Seconds 420 -Scenario gametravel -Root $Root } },
     @{ n = "carsync";   cmd = { & powershell -NoProfile -File "$PSScriptRoot\test_carsync.ps1" -Name "$Prefix-carsync" -Root $Root } },
     @{ n = "itemstate"; cmd = { & powershell -NoProfile -File "$PSScriptRoot\test_itemstate.ps1" -Name "$Prefix-itemstate" -Root $Root } },
     @{ n = "refuel";    cmd = { & powershell -NoProfile -File "$PSScriptRoot\test_refuel.ps1" -Name "$Prefix-refuel" -Root $Root } },

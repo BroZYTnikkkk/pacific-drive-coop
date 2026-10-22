@@ -37,6 +37,14 @@ or the car, in which case they are seated as a passenger). Saved positions and t
 
 ## Known gaps
 
+- **The two players have different worlds.** Each game generates its own world; the mod shares only world items
+  (loot), the car (position, parts, fuel, battery) and its trunk. Doors, props, containers outside the car,
+  hazards and weather are per player: a door opened by one is closed for the other (collision comes from the
+  host), each has its own loot in containers. Making the worlds the same is the next big step.
+- **Esc on the host is off while a partner is connected**: the host's pause menu crashed the game natively
+  (playtest 2026-10-21, reproduced). Settings and quit-to-menu are reachable when the partner is not connected.
+- The trunk is used by one player at a time: while it is open at one player, the other cannot open it.
+- The game's map in the car shows nothing for player 2.
 - World items and the car trunk are shared (host is the truth); **inventories are per player**. Player 2's
   inventory (pockets and hand) is saved on the host in `ue4ss/Mods/PDCoopNet/save_<id>.txt`; the id is in
   player 2's `ue4ss/Mods/PDCoopNet/player_id.txt` (keep that file to keep the inventory). Equipment slots,
@@ -49,7 +57,7 @@ or the car, in which case they are seated as a passenger). Saved positions and t
   confirmed by a human. Player 2's death losses: in the tests (a zone opened directly, not a real run) the
   game removed nothing from the host's pockets and the mod removed nothing from player 2's; the real run
   rule and the tombstone hand-over were not tested.
-- Dropping an item by player 2 is implemented (sent to the host) but not tested.
+- An item dropped by player 2 is placed at its feet on the host (no throw, no falling physics).
 - Fixtures such as the garage gas pump handles are mirrored too; if player 2 stands next to one when a map
   loads, the mod could mistake the pump taking its handle for a pickup and remove the host's handle.
 - The game's own map changes drop the listen server; the mod re-hosts by loading the map a second time
@@ -58,14 +66,26 @@ or the car, in which case they are seated as a passenger). Saved positions and t
   grey default material. There is no sitting pose: a seated player is a standing mannequin lowered into the
   seat. Held items, the flashlight and animations other than walking are not mirrored (not implemented).
 - The screen effects of damage (red/brown blood overlay) are the game's own and not synced.
-- Internet play was not tested (only localhost). The mod uses Unreal's IP net driver: the host must be
-  reachable on UDP port 7777 (port forward, or a LAN/VPN such as Tailscale/ZeroTier).
-- The play keys (F6/F7/F8 below) were not pressed in any test. The tests run the same actions from bots
-  (SEAT/UNSEAT commands, `servertravel ...?listen`, `open <host>`), not through the key bindings.
+- The mod uses Unreal's IP net driver: the host must be reachable on UDP port 7777. Played over Radmin VPN on
+  2026-10-21 (works); a port forward or another VPN (Tailscale, ZeroTier) works the same way.
 - A real run (garage gateway → zones → back) was not tested, only map changes started by the test bot.
 - Game build tested: Steam build 21896301. Other builds may break it.
 
 ## Install (both players)
+
+**Easiest:** download `PDCoop-installer.zip` from the [latest release](https://github.com/BroZYTnikkkk/pacific-drive-coop/releases/latest),
+unpack it anywhere, double-click `PDCoop.bat`:
+
+| Menu | What |
+|---|---|
+| 1 Install / update | backs up your saves (Documents\PDCoop-backups), installs UE4SS (pinned build, SHA-256 checked) and the newest mod; an update replaces the old mod files and keeps your role.txt, features.txt, player_id.txt, save_*.txt. A `PDCoopNet-*.zip` next to the script is installed instead of the download (offline / test builds). |
+| 2 Role | host, or client + the host's address |
+| 3 Collect logs | writes one `PDCoop-report-<time>.txt` with versions, settings, logs and crash summaries; user and PC names, account ids and IPs other than Radmin VPN are removed. Send that file. |
+| 4 Uninstall | removes the mod (UE4SS too if you say so) |
+
+Then start the game through Steam as usual.
+
+**By hand:**
 
 1. Install UE4SS into `<game dir>/PenDriverPro/Binaries/Win64/`. Tested with the UE4SS
    `experimental-latest` dev build `zDEV-UE4SS_v3.0.1-1181-g83330635.zip`
@@ -85,8 +105,8 @@ or the car, in which case they are seated as a passenger). Saved positions and t
 |---|---|---|
 | Host | F8 | load your save, then press F8: the current map is re-opened as a listen server |
 | Friend | F8 | connect to the host from the main menu |
-| Friend | F6 | sit in the host's car as passenger |
-| Friend | F7 | get out of the car |
+| Friend | E at the car / F6 | sit in the host's car as passenger (always the passenger: the host drives) |
+| Friend | E in the car / F7 | get out of the car |
 | Either | hold E (5 s) | revive a downed partner next to you |
 
 The keys are only read while the game window has focus. Logs are in `ue4ss/UE4SS.log` (lines tagged `[PDCoopNet]`).

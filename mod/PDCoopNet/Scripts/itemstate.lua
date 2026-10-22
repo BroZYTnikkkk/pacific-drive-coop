@@ -40,19 +40,23 @@ return function(ctx)
         o = StaticFindObject(path)
         return valid(o) and o or nil
     end
-    local propCache, accessors = {}, {}
+    local propCache = {}
     local function propStruct(s)
         if propCache[s.k] == nil then propCache[s.k] = findOrLoad(PROP .. s.prop .. "." .. s.prop) or false end
         return propCache[s.k] or nil
     end
+    -- A new accessor for every use, never kept: nothing in the game references it, so Unreal's garbage collector
+    -- frees it, and a kept one was a dangling pointer (dev session 2026-10-22: the dev tools' copy of this module
+    -- crashed the host with an access violation inside a UObject call). GC does not run while Lua runs, so an
+    -- accessor made here lives for the call that made it.
+    local accClass = {}
     local function accessor(s)
-        local a = accessors[s.k]
-        if valid(a) then return a end
-        local cls = findOrLoad(COMP .. s.comp .. "." .. s.comp .. "_C")
+        local cls = accClass[s.k]
+        if not valid(cls) then cls = findOrLoad(COMP .. s.comp .. "." .. s.comp .. "_C"); accClass[s.k] = cls end
         if not cls then return nil end
         local outer = FindFirstOf("InventorySystem")
         local ok, obj = pcall(function() return StaticConstructObject(cls, outer) end)
-        if ok and valid(obj) then accessors[s.k] = obj; return obj end
+        if ok and valid(obj) then return obj end
         log("ITEMSTATE cannot create the %s accessor: %s", s.comp, tostring(obj))
         return nil
     end

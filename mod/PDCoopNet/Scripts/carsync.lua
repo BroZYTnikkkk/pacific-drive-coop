@@ -342,6 +342,10 @@ return function(ctx)
                 end
             end
             return true
+        elseif kind == "CARRESET" then
+            return M.resetCommand(args, pc)
+        elseif kind == "TRUNKLOCK" or kind == "TRUNKUNLOCK" then
+            return M.lockCommand(kind, pc)
         elseif kind == "HELLO" then
             local id = sanitizeId(args)
             if id == "" then return true end
@@ -598,6 +602,164 @@ return function(ctx)
                 cl.invSentTick = fastTick
                 ctx.sendCommand("INVSAVE," .. playerId() .. "!" .. text)
                 log("CARSYNC inventory sent to the host for saving (%d bytes)", #text)
+            end
+        end
+    end
+
+    -- ------------------------------------------------------------ trunk lock
+    -- Only one player has the trunk open at a time (owner's decision 2026-10-22, until world sync replaces the
+    -- container mirror): both taking the same item at once duplicated it. Opening is seen through the game's
+    -- open functions (hooked on both machines), the host decides who holds the trunk (first come), the other
+    -- player's menu is closed with a message. Release: the holder's player menu is no longer open (polled).
+    local lock = { holder = "none", mine = false, hooked = false, tries = 0, wantSince = nil, lastSaid = 0 }
+    local IM_PATH = "/Game/Systems/Managers/BP_InventoryManager.BP_InventoryManager_C:"
+    local function menuOpen()
+        local m, open = im(), false
+        if valid(m) then
+            local a = {}
+            pcall(function() m:IsPlayerMenuOpen(a, {}) end)
+            open = a.IsOpen == true
+        end
+        return open
+    end
+    local function closeMenu(reason)
+        local m = im()
+        if valid(m) then pcall(function() m:RequestPlayerMenuClose() end) end
+        local wl = FindFirstOf("UMG_Feedback_WarningList_C")
+        if valid(wl) then
+            pcall(function()
+                wl:SetVisibility(4)
+                wl["Add Message"](wl, FText(reason), 1, FName("PDCoopTrunk"), nil)
+            end)
+        end
+        log("TRUNKLOCK %s", reason)
+    end
+    local function isTrunk(c)
+        local t = trunk()
+        return valid(c) and t and c:GetFullName() == t:GetFullName()
+    end
+    -- this player opened the trunk
+    local function openedTrunk()
+        if not on("trunk") then return end
+        -- one open calls OpenCarInventories -> OpenPlayerInventory -> OpenInventoryContainer: count it once
+        local now = os.clock()
+        if lock.lastOpen and now - lock.lastOpen < 1.0 then return end
+        lock.lastOpen = now
+        if ctx.role() == "host" then
+            if lock.holder ~= "none" and lock.holder ~= "host" then
+                closeMenu("The trunk is open at your partner's.")
+            else
+                lock.holder, lock.mine = "host", true
+                ctx.hostSendLatest("TRUNKLOCK|host")
+            end
+        else
+            lock.wantSince = os.clock()
+            ctx.sendCommand("TRUNKLOCK")
+        end
+    end
+    local function registerLockHooks()
+        if lock.hooked or lock.tries > 30 then return end
+        lock.tries = lock.tries + 1
+        if not StaticFindObject(IM_PATH .. "OpenCarInventories") then return end
+        local okAll = true
+        okAll = pcall(function() RegisterHook(IM_PATH .. "OpenCarInventories", function() openedTrunk() end) end) and okAll
+        okAll = pcall(function()
+            RegisterHook(IM_PATH .. "OpenPlayerInventory", function(_, _, other)
+                local c = nil
+                pcall(function() c = other:get() end)
+                if isTrunk(c) then openedTrunk() end
+            end)
+        end) and okAll
+        okAll = pcall(function()
+            RegisterHook(IM_PATH .. "OpenInventoryContainer", function(_, cont)
+                local c = nil
+                pcall(function() c = cont:get() end)
+                if isTrunk(c) then openedTrunk() end
+            end)
+        end) and okAll
+        lock.hooked = true
+        log("TRUNKLOCK hooks registered ok=%s", tostring(okAll))
+    end
+    M.openedTrunk = openedTrunk   -- for the dev tools / tests
+
+    -- ------------------------------------------------------------ car reset (teleport) by player 2
+    -- The car reset runs in player 2's game on its copy of the car (animation, no real move: the host's
+    -- replicated transform wins). Player 2's StartCarReset / StopCarReset are forwarded; the host runs them on
+    -- the real car, so the car moves for both (owner's decision 2026-10-22: player 2 may reset the car).
+    local CM_PATH = "/Game/Systems/Managers/BP_CarManager.BP_CarManager_C:"
+    local reset = { hooked = false, tries = 0, forwarding = false }
+    local function registerResetHooks()
+        if reset.hooked or reset.tries > 30 or ctx.role() ~= "client" then return end
+        reset.tries = reset.tries + 1
+        if not StaticFindObject(CM_PATH .. "StartCarReset") then return end
+        local ok1 = pcall(function() RegisterHook(CM_PATH .. "StartCarReset", function() ctx.sendCommand("CARRESET,start") end) end)
+        local ok2 = pcall(function() RegisterHook(CM_PATH .. "StopCarReset", function() ctx.sendCommand("CARRESET,stop") end) end)
+        reset.hooked = true
+        log("CARRESET hooks for player 2 ok=%s/%s", tostring(ok1), tostring(ok2))
+    end
+    function M.resetCommand(args, pc)
+        local _, carm = FindFirstOf("BP_MainCharacterManager_C"), FindFirstOf("BP_CarManager_C")
+        if not valid(carm) then return true end
+        local fn = (args == "stop") and "StopCarReset" or "StartCarReset"
+        local ok, err = pcall(function() carm[fn](carm) end)
+        log("CARRESET %s from %s ok=%s %s", fn, ctx.objName(pc), tostring(ok), ok and "" or tostring(err))
+        return true
+    end
+
+    -- host: requests and releases from player 2
+    function M.lockCommand(kind, pc)
+        if kind == "TRUNKLOCK" then
+            local pid = tostring(pc.PlayerState.PlayerId)
+            if lock.holder == "none" or lock.holder == pid then
+                lock.holder = pid
+                log("TRUNKLOCK player %s has the trunk", pid)
+            else
+                log("TRUNKLOCK player %s asked, %s has it", pid, lock.holder)
+            end
+            ctx.hostSendLatest("TRUNKLOCK|" .. lock.holder)
+            return true
+        elseif kind == "TRUNKUNLOCK" then
+            local pid = tostring(pc.PlayerState.PlayerId)
+            if lock.holder == pid then lock.holder = "none"; ctx.hostSendLatest("TRUNKLOCK|none") end
+            return true
+        end
+        return false
+    end
+    ctx.hostMsgHandlers["TRUNKLOCK"] = function(rest)
+        lock.holder = rest
+        local me = tostring(ctx.myPlayerId())
+        if rest == me then
+            lock.mine, lock.wantSince = true, nil
+        elseif lock.wantSince then
+            -- asked for it, the partner has it: close this player's menu
+            lock.wantSince = nil
+            lock.mine = false
+            if rest ~= "none" then closeMenu("The trunk is open at your partner's.") end
+        end
+    end
+
+    function M.lockTick()
+        pcall(registerResetHooks)
+        if not on("trunk") then return end
+        registerLockHooks()
+        if ctx.role() == "host" then
+            -- the holder left the session: free the trunk
+            if lock.holder ~= "none" and lock.holder ~= "host" then
+                local present = false
+                for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+                    local ok, pid = pcall(function() return pc.PlayerState.PlayerId end)
+                    if ok and valid(pc) and not pc:IsLocalController() and tostring(pid) == lock.holder then present = true end
+                end
+                if not present then lock.holder = "none"; ctx.hostSendLatest("TRUNKLOCK|none"); log("TRUNKLOCK holder left") end
+            end
+            if lock.mine and not menuOpen() then
+                lock.mine = false
+                if lock.holder == "host" then lock.holder = "none"; ctx.hostSendLatest("TRUNKLOCK|none") end
+            end
+        else
+            if lock.mine and not menuOpen() then
+                lock.mine = false
+                ctx.sendCommand("TRUNKUNLOCK")
             end
         end
     end

@@ -1586,6 +1586,33 @@ elseif ROLE == "client" then
     RegisterKeyBind(Key.F6, onGameThread(function() sendCommand("SEAT") end))
     RegisterKeyBind(Key.F7, onGameThread(function() sendCommand("UNSEAT") end))
 end
+-- F9: watch the other player (its own third-person camera on a spring arm behind it), F9 again: back. The own
+-- character stays where it is and still takes input.
+local watching = nil
+local function toggleWatch()
+    local pc = localController()
+    if not valid(pc) then return end
+    if valid(watching) then
+        pcall(function() watching.TP_Camera:Deactivate() end)
+        pcall(function() pc:SetViewTargetWithBlend(pc.Pawn, 0.3, 0, 0, false) end)
+        log("WATCH back to my own view")
+        watching = nil
+        return
+    end
+    watching = nil
+    for _, ch in ipairs(FindAllOf(CHARACTER_CLASS) or {}) do
+        if valid(ch) and not isMyCharacter(ch) then watching = ch end
+    end
+    if not watching then log("WATCH no other player"); return end
+    local ok, err = pcall(function()
+        watching.FP_Camera:Deactivate()
+        watching.TP_SpringArm.TargetArmLength = 350
+        watching.TP_Camera:Activate(false)
+        pc:SetViewTargetWithBlend(watching, 0.3, 0, 0, false)
+    end)
+    log("WATCH watching %s ok=%s %s", objName(watching), tostring(ok), ok and "" or tostring(err))
+end
+if ROLE == "host" or ROLE == "client" then RegisterKeyBind(Key.F9, onGameThread(toggleWatch)) end
 -- E also counts for the revive (a fallback if the game does not report it as held); only a timestamp here,
 -- the key hook runs outside the game thread
 RegisterKeyBind(Key.E, function() Downed.keyPressed() end)

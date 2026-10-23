@@ -59,7 +59,9 @@ if ($pairs.Count -gt 0) {
     function Use($client, $d) {
         Dev $client "lua for _,a in ipairs(FindAllOf('$($d.C)')) do if a:IsValid() then local l=a:K2_GetActorLocation() if math.abs(l.X-($($d.X)))+math.abs(l.Y-($($d.Y)))+math.abs(l.Z-($($d.Z)))<40 then a:$INTERACT(a.Highlight, nil) return 'used' end end end return 'not found'"
     }
-    # the host uses door 1
+    # the host uses door 1, not a locked one (state 3: using it only shakes it; exp138 picked one)
+    $first = @($pairs | Where-Object { $_[0].St -ne 3 })
+    if ($first.Count -gt 0) { $pairs = @($first) + @($pairs | Where-Object { $_[0].St -eq 3 }) }
     $h1 = $pairs[0][0]
     $u = Use "client1" $h1
     Start-Sleep 5

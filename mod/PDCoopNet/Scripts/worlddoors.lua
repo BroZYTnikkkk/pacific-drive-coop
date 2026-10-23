@@ -4,18 +4,25 @@
 -- keep it in plain variables (CurrentState, the door mesh's rotation) and each game randomizes it at BeginPlay
 -- (RandomizeDoorState), so the same door could be open for one player and closed for the other, and the collision
 -- that counts is the host's (player 2's character moves on the host).
---   host:     every second the state of each door (CurrentState + door mesh relative transform) is compared with
---             what was sent; changes go to player 2, everything goes to a new set of clients.
+--   host:     a door whose state may have changed (its open/close animation finished, its state was set, its lock
+--             opened: hooked events) is compared with what was sent, changes go to player 2; every 10 s all doors are
+--             compared as well; everything goes to a new set of clients.
 --   player 2: applies the host's state to the same door (class + position, both on the host's spot after the
 --             worldrep placement fixes); its own E on a door runs the door locally and is sent to the host, which
 --             runs the same interaction on its door (exp108: the interact event with the door's Highlight and no
 --             data opens/closes it on the host).
 return function(ctx)
     local log, valid = ctx.log, ctx.valid
+    local EV = ctx.Events
     local M = {}
     local INTERACT = "BndEvt__Highlight_K2Node_ComponentBoundEvent_0_OnHighlightInteract__DelegateSignature"
+    -- every zone door is one of these two Blueprints or a child of one; both declare the events below
+    local ROOTS = { "BP_Door_Single_C", "BP_Door_Sliding_Single_C" }
+    local CHANGED = { "AnimTimeline__FinishedFunc", "Set Door from State", "OnLockOpened_Event_0" }
+    local rootPath = {}         -- root class name -> its path
     local doors = {}            -- discovered door actors (this machine): list
-    local classes = {}          -- class name -> class path (hook registered)
+    local dirty = {}            -- host: door full name -> true (an event said its state may have changed)
+    local ticks = 0
     local lastSent = {}         -- host: door full name -> state text
     local sentKey = ""
     local desired = {}          -- client: class -> list of { x, y, z, text, st, rel = {lx,ly,lz,p,yw,r} }
@@ -36,56 +43,54 @@ return function(ctx)
         return string.format("%d,%.0f,%.0f,%.0f,%.1f,%.1f,%.1f", st, l.X, l.Y, l.Z, r.Pitch, r.Yaw, r.Roll)
     end
 
-    -- the client's E on a replicated door: run by the host too. The event is declared by a parent class
-    -- (BP_Door_Sliding_Single_C for the sliding doors, BP_Door_Single_C for the T1/T2 variants): hooked there once.
-    local hooked = {}           -- class path that declares the event -> true
-    local function registerHook(cls)
-        local fn, classPath = nil, nil
-        for _ = 1, 6 do
-            if not (cls and cls:IsValid()) then break end
-            classPath = cls:GetFullName():match("%s(%S+)$")
-            local f = StaticFindObject(classPath .. ":" .. INTERACT)
-            if f and f:IsValid() then fn = classPath .. ":" .. INTERACT; break end
-            cls = cls:GetSuperStruct()
+    -- the client's E on a replicated door: run by the host too. Replicated doors and the client's own copies of
+    -- the host's level-attached ones alike: the host finds its door by class and place.
+    local function onClientInteract(selfp)
+        if ctx.role() ~= "client" or not ctx.enabled() then return end
+        local d = selfp:get()
+        if not valid(d) then return end
+        local l = d:K2_GetActorLocation()
+        local c = d:GetClass():GetFName():ToString()
+        quietUntil[d:GetFullName()] = os.clock() + 3
+        ctx.sendCommand(string.format("DOOR,%s,%.0f,%.0f,%.0f", c, l.X, l.Y, l.Z))
+        log("DOORS player 2 used %s at %.0f,%.0f,%.0f: sent to the host", c, l.X, l.Y, l.Z)
+    end
+    local function onHostChanged(selfp)
+        local ok, name = pcall(function() return selfp:get():GetFullName() end)
+        if ok and name then dirty[name] = true end
+    end
+    local function hookRoots()
+        for _, path in pairs(rootPath) do
+            if ctx.role() == "client" then
+                EV.hookFunction(path .. ":" .. INTERACT, onClientInteract)
+            else
+                for _, fn in ipairs(CHANGED) do EV.hookFunction(path .. ":" .. fn, onHostChanged) end
+            end
         end
-        if not fn then log("DOORS no %s in the class chain", INTERACT:sub(1, 40)); return false end
-        if hooked[classPath] then return true end
-        hooked[classPath] = true
-        local ok, err = pcall(function()
-            RegisterHook(fn, function(selfp)
-                if ctx.role() ~= "client" or not ctx.enabled() then return end
-                -- replicated doors and the client's own copies of the host's level-attached ones alike: the host
-                -- finds its door by class and place
-                local d = selfp:get()
-                if not valid(d) then return end
-                local l = d:K2_GetActorLocation()
-                local c = d:GetClass():GetFName():ToString()
-                quietUntil[d:GetFullName()] = os.clock() + 3
-                ctx.sendCommand(string.format("DOOR,%s,%.0f,%.0f,%.0f", c, l.X, l.Y, l.Z))
-                log("DOORS player 2 used %s at %.0f,%.0f,%.0f: sent to the host", c, l.X, l.Y, l.Z)
-            end)
-        end)
-        log("DOORS hook %s: %s", fn:match("[^/]+$"), ok and "ok" or tostring(err))
-        return ok
     end
 
-    -- every 5 s: find the doors (and hook new door classes on player 2)
+    -- every 5 s: the doors of both root classes (children included), hooks in place (a new zone loads the classes
+    -- again)
     function M.discover()
         if not ctx.enabled() then return end
         local found = {}
-        for _, a in ipairs(FindAllOf("Actor") or {}) do
-            if valid(a) then
-                local c = a:GetClass():GetFName():ToString()
-                if c:sub(1, 7) == "BP_Door" and isDoor(a, c) then
+        for _, root in ipairs(ROOTS) do
+            for _, a in ipairs(FindAllOf(root) or {}) do
+                if valid(a) and isDoor(a, a:GetClass():GetFName():ToString()) then
                     found[#found + 1] = a
-                    if classes[c] == nil then
-                        classes[c] = false
-                        if ctx.role() == "client" then classes[c] = registerHook(a:GetClass()) end
+                    if not rootPath[root] then
+                        local cls = a:GetClass()
+                        for _ = 1, 6 do
+                            if not (cls and cls:IsValid()) then break end
+                            if cls:GetFName():ToString() == root then rootPath[root] = cls:GetFullName():match("%s(%S+)$"); break end
+                            cls = cls:GetSuperStruct()
+                        end
                     end
                 end
             end
         end
         doors = found
+        hookRoots()
     end
 
     local function remoteKey()
@@ -97,26 +102,31 @@ return function(ctx)
         return table.concat(keys, ";")
     end
 
-    -- host, every second
+    -- host, every second: the doors an event marked, all of them every 10 s
     function M.hostTick()
         if not ctx.enabled() then return end
         local key = remoteKey()
-        if key == "" then sentKey = ""; return end
+        if key == "" then sentKey = ""; dirty = {}; return end
         local fresh = key ~= sentKey
         sentKey = key
+        ticks = ticks + 1
+        local all = fresh or ticks % 10 == 0
+        if not all and next(dirty) == nil then return end
+        local marked = dirty
+        dirty = {}
         local out, size = {}, 0
         local function flush()
             if #out > 0 then ctx.hostSend("DOORS|" .. table.concat(out, ";")); out, size = {}, 0 end
         end
         for _, d in ipairs(doors) do
-            if valid(d) then
+            if valid(d) and (all or marked[d:GetFullName()]) then
                 local okS, text = pcall(stateText, d)
                 local name = d:GetFullName()
                 if okS and (fresh or lastSent[name] ~= text) then
                     lastSent[name] = text
                     local l = d:K2_GetActorLocation()
                     local e = string.format("%s,%.0f,%.0f,%.0f,%s", d:GetClass():GetFName():ToString(), l.X, l.Y, l.Z, text)
-                    if size + #e > 7000 then flush() end
+                    if size + #e > ctx.CHAN_MAX - 200 then flush() end
                     out[#out + 1] = e; size = size + #e + 1
                 end
             end
@@ -164,6 +174,9 @@ return function(ctx)
                 entry.logged = false
             end
         end
+        -- applied at once (the client tick is only the 5 s check)
+        local ok, err = pcall(M.clientTick)
+        if not ok then log("DOORS apply error: %s", tostring(err)) end
     end
 
     local fullAt = nil          -- client: when the host's full door list was complete
@@ -172,7 +185,7 @@ return function(ctx)
         log("DOORS the host's %s door(s) known", tostring(rest))
     end
 
-    -- client, every second: put each door the way the host has it. A door of the client's own (role authority:
+    -- client, when the host's states arrive and every 5 s: put each door the way the host has it. A door of the client's own (role authority:
     -- built by its own game, not replicated) that the host does not have is removed once the host has sent its
     -- full list and no new door for 20 s: its prefab was generated elsewhere on the host (exp112: 4 sliding doors
     -- 600-4700 uu from any host door). Not sooner: the host finds its doors every 5 s, and its first full list can
@@ -249,7 +262,7 @@ return function(ctx)
         if n > 0 then log("DOORS %d door(s) set to the host's state", n) end
     end
 
-    function M.reset() doors, lastSent, sentKey, desired, quietUntil, fullAt, lastNewAt = {}, {}, "", {}, {}, nil, 0 end
+    function M.reset() doors, lastSent, sentKey, desired, quietUntil, fullAt, lastNewAt, dirty = {}, {}, "", {}, {}, nil, 0, {} end
 
     return M
 end

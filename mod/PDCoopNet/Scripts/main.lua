@@ -650,7 +650,7 @@ local WorldLoot = require("worldloot")({
 
 -- zone doors follow the host (worlddoors.lua)
 local WorldDoors = require("worlddoors")({
-    log = log, valid = valid,
+    log = log, valid = valid, Events = Events, CHAN_MAX = CHAN_MAX,
     enabled = function() return feature("doors") end,
     role = function() return ROLE end,
     sendCommand = function(cmd) sendCommand(cmd) end,
@@ -1847,10 +1847,11 @@ LoopInGameThreadWithDelay(200, function()
                 okD, errD = pcall(Downed.hostAfterDeathTick)
                 if not okD then log("downed error: %s", tostring(errD)) end
             end
-            -- doors: find them every 5 s, state every second
+            -- doors: find them every 5 s; the host sends changed ones every second, player 2 applies them as they
+            -- arrive and checks every 5 s
             local okW, errW = true, nil
             if fastTick % 25 == 13 then okW, errW = pcall(WorldDoors.discover) end
-            if okW and fastTick % 5 == 2 then
+            if okW and ((ROLE == "host" and fastTick % 5 == 2) or (ROLE == "client" and fastTick % 25 == 2)) then
                 okW, errW = pcall(ROLE == "host" and WorldDoors.hostTick or WorldDoors.clientTick)
             end
             if not okW then log("doors error: %s", tostring(errW)) end

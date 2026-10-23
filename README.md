@@ -68,9 +68,10 @@ or the car, in which case they are seated as a passenger). Saved positions and t
   loads, the mod could mistake the pump taking its handle for a pickup and remove the host's handle.
 - The game's own map changes drop the listen server; the mod re-hosts by loading the map a second time
   (+15-30 s per map change), and clients reconnect (retry every 30 s).
-- Bodies are the game's stock mannequin (the player character is a first-person invisible mesh) with Unreal's
-  grey default material. There is no sitting pose: a seated player is a standing mannequin lowered into the
-  seat. Held items, the flashlight and animations other than walking are not mirrored (not implemented).
+- Bodies are the game's stock mannequin (the player character is a first-person invisible mesh), one colour per
+  player (refactor branch: host orange, player 2 blue), animated with the game's own ALS v3 clips: idle, walk,
+  run, sprint, crouch, jump, fall, lying when down. There is no sitting clip in the game: a seated player has
+  the crouch pose, lowered into the seat. Held items and the flashlight are not mirrored.
 - The screen effects of damage (red/brown blood overlay) are the game's own and not synced.
 - The mod uses Unreal's IP net driver: the host must be reachable on UDP port 7777. Played over Radmin VPN on
   2026-10-21 (works); a port forward or another VPN (Tailscale, ZeroTier) works the same way.
@@ -98,7 +99,9 @@ Then start the game through Steam as usual.
    (SHA-256 `82378cd7f679d055026286f11347355ac67c712f21eb892060c902bb0184b907`), from the
    [official releases](https://github.com/UE4SS-RE/RE-UE4SS/releases).
 2. Copy `mod/PDCoopNet` (with all its `Scripts/*.lua` files) into `<game dir>/PenDriverPro/Binaries/Win64/ue4ss/Mods/` and add the line
-   `PDCoopNet : 1` to `ue4ss/Mods/mods.txt` (above `Keybinds : 1`).
+   `PDCoopNet : 1` to `ue4ss/Mods/mods.txt` (above `Keybinds : 1`). Copy `mod/PDCoopNet/LogicMods/PDCoopNet.pak` into
+   `<game dir>/PenDriverPro/Content/Paks/LogicMods/` and make sure `mods.txt` has `BPModLoaderMod : 1`
+   (refactor branch, v0.9).
 3. Optional: copy `features.example.txt` to `features.txt` to switch parts off (see [PLAYTEST.md](PLAYTEST.md)).
 4. Create `ue4ss/Mods/PDCoopNet/role.txt`:
    - host: one line `host`
@@ -138,9 +141,14 @@ looting). `tools/run_single.ps1` runs one copy for quick probes. Developer tools
 
 See the lab notes linked above. In short: Pacific Drive ships Unreal 4.27.2 with `IpNetDriver` compiled in
 but no replication in its own code. The mod opens the map with `?listen`, spawns and possesses a
-`PDP_MainCharacter_C` for each remote player, removes the client's local duplicate car, uses the stock
-`ServerChangeName` RPC as a client-to-host command channel, attaches passengers to the host-simulated car,
-and makes the car kinematic on clients (following `ReplicatedMovement`).
+`PDP_MainCharacter_C` for each remote player, removes the client's local duplicate car, attaches passengers
+to the host-simulated car, and makes the car kinematic on clients (following `ReplicatedMovement`).
+
+Messages between the host and the other players go through our own replicated actor, `PDCoopChannel`, from
+`PDCoopNet.pak` (a small Blueprint-only UE 4.27 project in [`pak/`](pak/README.md), loaded by UE4SS's
+BPModLoaderMod): the host spawns one per remote player, owned by that player's controller, and reliable
+Server / Client RPCs carry the messages over the game's own connection (`channel.lua`). Sync modules react to
+game events where the game has them (items entering or leaving a container: `events.lua`).
 
 ## Credits and license
 

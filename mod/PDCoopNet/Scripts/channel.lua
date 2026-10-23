@@ -21,9 +21,12 @@ local fastTick = 0           -- 200 ms ticks of the host channel loop (stats)
 local hostMsgHandlers = {}   -- kind -> function(rest, seq), host -> client messages
 local handleHostCommand      -- function(pc, cmd, seq), client -> host commands (main.lua sets it)
 
+-- a kept object is still the one we loaded: after a map change it can be collected and its slot reused by another
+-- object, which still looks valid (exp175: the host never opened a channel, it spawned from a stale class)
+local function same(o, path) return valid(o) and o:GetFullName():find(path, 1, true) ~= nil end
 local chanClass = nil
 local function channelClass()
-    if valid(chanClass) then return chanClass end
+    if same(chanClass, CHAN_CLASS) then return chanClass end
     local c = StaticFindObject(CHAN_CLASS)
     if not valid(c) then
         -- UE4SS LoadAsset returned an invalid object for it (exp123); the asset registry loads it, as BPModLoaderMod does
@@ -220,8 +223,8 @@ LoopInGameThreadWithDelay(50, function() drainInbox() end)
 local hooks = {}             -- function name -> { fn = function object, ids = { pre, post } }
 local function hookOne(name, withRef)
     local h = hooks[name]
-    if h and valid(h.fn) then return true end
     local path = CHAN_CLASS .. ":" .. name
+    if h and same(h.fn, path) then return true end
     local fn = StaticFindObject(path)
     if not valid(fn) then return false end
     if h and h.ids then

@@ -111,6 +111,24 @@ local function managers()
     return FindFirstOf("BP_MainCharacterManager_C"), FindFirstOf("BP_CarManager_C")
 end
 
+-- a character out of the car walks and collides again. The game's enter switches its capsule to NoCollision and only
+-- its own exit switches it back, which never runs for a character the mod takes out (exp179: the other player's
+-- capsule stayed off on both machines; on player 2's machine the host fell through the floor again and again).
+-- Returns true when the capsule had been off.
+local function standOnFeet(ch)
+    pcall(function() ch.CharacterMovement:SetComponentTickEnabled(true) end)
+    pcall(function() ch:SetActorEnableCollision(true) end)
+    local wasOff = false
+    pcall(function()
+        if ch.CapsuleComponent:GetCollisionEnabled() == 0 then           -- ECollisionEnabled::NoCollision
+            ch.CapsuleComponent:SetCollisionEnabled(3)                    -- QueryAndPhysics, as a walking character has
+            wasOff = true
+        end
+    end)
+    pcall(function() ch.CharacterMovement:SetMovementMode(1, 0) end)    -- MOVE_Walking
+    return wasOff
+end
+
 -- ---------------------------------------------------------------- status
 -- Bodies. PDP_MainCharacter's mesh is the ALS mannequin with the invisible M_PlayerCharacter_Invist material.
 -- Other players' characters get a real material on every machine; your own stays invisible (first person).
@@ -131,7 +149,7 @@ local bodyColorMat = nil     -- false: not in the pak
 -- checked every time: nothing of ours references the loaded asset, so it is collected after a map change (exp132:
 -- player 2 crashed after rejoining, a material instance made from the freed material)
 local function bodyColorMaterial()
-    if bodyColorMat and not valid(bodyColorMat) then bodyColorMat = nil end
+    if bodyColorMat and not (valid(bodyColorMat) and bodyColorMat:GetFullName():find("M_PDCoopBody", 1, true)) then bodyColorMat = nil end
     if bodyColorMat == nil then
         local m = StaticFindObject(BODY_COLOR_MATERIAL)
         if not valid(m) then
@@ -270,9 +288,9 @@ local function updateBodies()
                 b.collisionOff = true
                 log("BODY %s seated: collision off (mine=%s)", objName(ch), tostring(mine))
             elseif not seated and b.collisionOff then
-                ch:SetActorEnableCollision(true)
+                local capsuleWasOff = standOnFeet(ch)
                 b.collisionOff = false
-                log("BODY %s left the car: collision on", objName(ch))
+                log("BODY %s left the car: collision on (capsule was off: %s)", objName(ch), tostring(capsuleWasOff))
             end
         end
     end
@@ -559,7 +577,7 @@ end
 local function archLoad(short)
     local path = (short:sub(1, 1) == "~") and (ITEM_PREFIX .. short:sub(2)) or short
     -- a loaded asset can be collected after a map change: load it again then
-    if archCache[path] and not valid(archCache[path]) then archCache[path] = nil end
+    if archCache[path] and not (valid(archCache[path]) and archCache[path]:GetFullName():find(path:match("^(.-)%.") or path, 1, true)) then archCache[path] = nil end
     if archCache[path] == nil then
         local ok, a = pcall(LoadAsset, path)
         archCache[path] = (ok and valid(a)) and a or false
@@ -665,7 +683,7 @@ local WorldDoors = require("worlddoors")({
 
 -- the host's world items, local copies on the other players' machines (items.lua)
 local Items = require("items")({
-    log = log, valid = valid, UEHelpers = UEHelpers, ItemState = ItemState,
+    log = log, valid = valid, same = Events.same, UEHelpers = UEHelpers, ItemState = ItemState,
     archShort = archShort, archLoad = archLoad, instanceOf = instanceOf, className = className, objName = objName,
     dist = dist, role = function() return ROLE end, localController = function() return localController() end,
     hostSend = function(payload) hostSend(payload) end, sendCommand = function(cmd) sendCommand(cmd) end,
@@ -702,8 +720,13 @@ local function unseatPassenger(pc, car)
     local l = car:K2_GetActorLocation()
     local r = car:GetActorRightVector()
     ch:K2_SetActorLocation({ X = l.X + r.X * 320, Y = l.Y + r.Y * 320, Z = l.Z + 80 }, false, {}, true)
-    ch:SetActorEnableCollision(true)
-    pcall(function() ch.CharacterMovement:SetMovementMode(1, 0) end)   -- MOVE_Walking
+    standOnFeet(ch)
+    -- player 2 moves its own character there too: it stayed inside the car on its own machine (exp174, playtest:
+    -- "hard to get out of the car")
+    pcall(function()
+        local t = ch:K2_GetActorLocation()
+        hostSend(string.format("PLACE|%d|%.0f,%.0f,%.0f", pc.PlayerState.PlayerId, t.X, t.Y, t.Z))
+    end)
     seated[ch:GetFullName()] = nil
     log("UNSEAT %s detached from %s, now at %s (parent=%s)", objName(ch), objName(car), fmtLoc(ch), objName(ch:GetAttachParentActor()))
 end
@@ -768,6 +791,106 @@ local function registerSeatHook()
         end)
     end)
     log("SEATHOOK register %s ok=%s %s", path, tostring(ok), ok and "" or tostring(err))
+end
+
+-- The game seats every player character when one enters the car through its door (exp167: the host's E on the
+-- driver's door attached player 2's character to the car on the host while player 2 stood outside on its own
+-- machine; player 2's own E does the same to the host's character on player 2's machine). The two machines then
+-- disagree where that character is: stuck, falling through the ground, the host's body gone, the car thrown around
+-- (playtest 2026-10-23). Every 200 ms such an unasked seat is undone: back where the character was.
+local freeSpot = {}          -- character full name -> its last location while not attached
+local function undoUnwantedSeats()
+    for _, ch in ipairs(FindAllOf(CHARACTER_CLASS) or {}) do
+        if valid(ch) and not isMyCharacter(ch) then
+            local key = ch:GetFullName()
+            local okP, par = pcall(function() return ch:GetAttachParentActor() end)
+            local attached = okP and valid(par)
+            local unwanted, back = false, nil
+            if ROLE == "host" then
+                -- player 2 rides only after its SEAT (seated[]); the keeper and the join seating use seatPassenger too.
+                -- Back outside the passenger door, where UNSEAT puts it: while it was attached the host's corrections
+                -- had already pulled player 2 onto the seat on its own machine, so its old spot is gone, and a
+                -- character standing inside the car's body with collision on pushes the car (exp170)
+                unwanted = attached and isCar(par) and not seated[key]
+                if unwanted then
+                    pcall(function()
+                        local l, r = par:K2_GetActorLocation(), par:GetActorRightVector()
+                        back = { X = l.X + r.X * 320, Y = l.Y + r.Y * 320, Z = l.Z + 80 }
+                    end)
+                end
+            else
+                -- the host's character: attached here although the host's replicated attachment says it is not
+                local okR, repPar = pcall(function() return ch.AttachmentReplication.AttachParent end)
+                unwanted = attached and isCar(par) and okR and not valid(repPar)
+                pcall(function() local l = ch.ReplicatedMovement.Location; back = { X = l.X, Y = l.Y, Z = l.Z } end)
+            end
+            -- the host's character in the driver's seat, as player 2 gets it: the game attaches the driver to a part of
+            -- the car, and the offset player 2 receives puts it elsewhere on player 2's kinematic copy of the car
+            -- (exp168/169: 160-340 uu off, at Z -20291 / -38247 after a second entry: the host's body gone under the
+            -- ground). Put it on the seat.
+            if ROLE == "client" and attached and isCar(par) and not unwanted then
+                -- its movement component kept simulating a fall (capsule off) and pulled it 400 uu under the car
+                -- between snaps (exp182); standOnFeet switches it back on when it gets out
+                pcall(function()
+                    if ch.CharacterMovement:IsComponentTickEnabled() then ch.CharacterMovement:SetComponentTickEnabled(false) end
+                end)
+                pcall(function()
+                    local seat = par.TempSocket_Seat:K2_GetComponentLocation()
+                    local l = ch:K2_GetActorLocation()
+                    if math.abs(l.X - seat.X) + math.abs(l.Y - seat.Y) + math.abs(l.Z - seat.Z) > 30 then
+                        ch:K2_SetActorLocation(seat, false, {}, true)
+                        if not freeSpot[key .. "#seatlog"] then
+                            freeSpot[key .. "#seatlog"] = true
+                            log("SEAT %s was put %.0f,%.0f,%.0f by its attachment: moved onto the driver's seat", objName(ch), l.X, l.Y, l.Z)
+                        end
+                    end
+                end)
+            end
+            if unwanted then
+                -- the game's enter animation keeps moving the character into the seat for a few seconds (exp172:
+                -- player 2 stepped out and was pulled back onto the seat): stopped
+                for _, tl in ipairs({ "EnterCarTimeline", "EnterCarDipToBlack" }) do
+                    pcall(function() ch[tl]:Stop() end)
+                end
+                pcall(function() ch:K2_DetachFromActor(EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld) end)
+                if back then pcall(function() ch:K2_SetActorLocation(back, false, {}, true) end) end
+                standOnFeet(ch)
+                -- player 2 moves its own character (a teleport here is overridden by its own movement, exp171)
+                if ROLE == "host" and back then
+                    pcall(function()
+                        hostSend(string.format("PLACE|%d|%.0f,%.0f,%.0f", ch.Controller.PlayerState.PlayerId, back.X, back.Y, back.Z))
+                    end)
+                end
+                log("SEAT the game seated %s without a SEAT: undone, back at %s", objName(ch), fmtLoc(ch))
+            elseif not attached then
+                local l = ch:K2_GetActorLocation()
+                freeSpot[key] = { X = l.X, Y = l.Y, Z = l.Z }
+                local okC, capOff = pcall(function()
+                    return ch.CapsuleComponent:GetCollisionEnabled() == 0 or not ch.CharacterMovement:IsComponentTickEnabled()
+                end)
+                if okC and capOff then
+                    standOnFeet(ch)
+                    log("SEAT %s stood outside the car with its capsule or movement off: back on", objName(ch))
+                end
+                -- the host's character on player 2's machine, not in the car: where the host says it is. Player 2's
+                -- own enter / exit (E at the car) moved it too, once to Z -44120, and it stayed there until the host
+                -- moved again (exp173; playtest: "the body sinks into the ground until the other one moves")
+                if ROLE == "client" then
+                    pcall(function()
+                        local rl = ch.ReplicatedMovement.Location
+                        if math.abs(rl.X - l.X) + math.abs(rl.Y - l.Y) + math.abs(rl.Z - l.Z) > 200 then
+                            ch:K2_SetActorLocation({ X = rl.X, Y = rl.Y, Z = rl.Z }, false, {}, true)
+                            standOnFeet(ch)
+                            freeSpot[key .. "#fell"] = (freeSpot[key .. "#fell"] or 0) + 1
+                            if freeSpot[key .. "#fell"] <= 3 then
+                                log("SEAT %s was at %.0f,%.0f,%.0f: back where the host has it, collision on", objName(ch), l.X, l.Y, l.Z)
+                            end
+                        end
+                    end)
+                end
+            end
+        end
+    end
 end
 
 local keeperStarted = false
@@ -983,8 +1106,7 @@ local function clientCarTick()
         -- the host detached us (UNSEAT): walk again
         clientSeated = false
         pcall(function() ch.CharacterMovement:SetComponentTickEnabled(true) end)
-        pcall(function() ch:SetActorEnableCollision(true) end)
-        pcall(function() ch.CharacterMovement:SetMovementMode(1, 0) end)
+        standOnFeet(ch)
         log("RIDE left the car, walking at %s", fmtLoc(ch))
     elseif not valid(parent) and not seatRequested then
         charTicks = charTicks + 1
@@ -1034,6 +1156,46 @@ local function clientCarTick()
     end
 end
 
+-- player 2: the host undid a seat its game made, or player 2 got out (UNSEAT): stand where the host says (outside
+-- the passenger door)
+-- Applied once the host's detach has arrived by replication: the message comes first, and a detach made here before
+-- that was undone by the still attached replicated state (exp176: player 2 back on the seat 3 s later).
+local pendingPlace = nil
+hostMsgHandlers["PLACE"] = function(rest)
+    local id, x, y, z = rest:match("^(%d+)|(-?%d+),(-?%d+),(-?%d+)$")
+    if not id or tonumber(id) ~= myPlayerId() then return end
+    pendingPlace = { X = tonumber(x), Y = tonumber(y), Z = tonumber(z), at = os.clock() }
+end
+local function placeTick()
+    if not pendingPlace then return end
+    local pawn = localController().Pawn
+    if not valid(pawn) or className(pawn) ~= CHARACTER_CLASS then return end
+    local okR, repPar = pcall(function() return pawn.AttachmentReplication.AttachParent end)
+    if okR and valid(repPar) and os.clock() - pendingPlace.at < 2 then return end
+    local t = pendingPlace
+    pendingPlace = nil
+    pcall(function() pawn:K2_DetachFromActor(EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld) end)
+    -- the riding state ends here, before the teleport: the movement component switched off while riding, switched
+    -- on later by clientCarTick, put the character back on the seat (exp178)
+    if clientSeated then log("RIDE left the car, walking at the host's exit spot") end
+    clientSeated = false
+    pcall(function() pawn.CharacterMovement:SetComponentTickEnabled(true) end)
+    -- the game's exit animation (2 s, from the mod's Exit Car) walks toward the driver's door and carried player 2
+    -- 400 uu away from this spot after the teleport (exp181)
+    pcall(function() pawn.ExitCarTimeline:Stop() end)
+    standOnFeet(pawn)
+    -- player 2's own game still had it in the car (the car manager's PlayerCarState 1, left by its local enter) and
+    -- put it back on the seat every frame (exp179). The game's own exit event ends that state.
+    local _, carm = managers()
+    local okE, wasIn = pcall(function()
+        local st = carm.PlayerCarState
+        if st ~= 0 then carm:OnPlayerExitCar_Event() end
+        return st
+    end)
+    pawn:K2_SetActorLocation({ X = t.X, Y = t.Y, Z = t.Z }, false, {}, true)
+    log("SEAT standing where the host put me: %s (car state was %s, exit event ok=%s)", fmtLoc(pawn), tostring(wasIn), tostring(okE))
+end
+
 -- Player 2 pressing E at the car: its game runs CommandEnterCar locally and seats it in the driver's seat of its
 -- copy of the car, with no way out (playtest 2026-10-21; reproduced in a dev session: attached to the car, driver's
 -- view). The client undoes that with the game's own Exit Car and asks the host to seat it as passenger (SEAT);
@@ -1052,6 +1214,13 @@ local function registerEnterCarHook()
             local wasRiding = clientSeated
             ExecuteInGameThreadWithDelay(600, function()
                 if not valid(ch) then return end
+                -- getting out: the local enter's animation kept running after Exit Car and, when it ended 2 s later,
+                -- put player 2's game back into the in-car state, which keeps it on the seat (exp180)
+                if wasRiding then
+                    for _, tl in ipairs({ "EnterCarTimeline", "EnterCarDipToBlack" }) do
+                        pcall(function() ch[tl]:Stop() end)
+                    end
+                end
                 local okX, errX = pcall(function() callBPFunction(ch, "Exit Car", false, false) end)
                 if wasRiding then
                     sendCommand("UNSEAT")
@@ -1623,6 +1792,14 @@ LoopInGameThreadWithDelay(200, function()
     do  -- every 200 ms: a new body gets its material within one tick (exp49: one sample before the 1 s update)
         local okB, errB = pcall(updateBodies)
         if not okB then log("bodies error: %s", tostring(errB)) end
+        if ROLE == "host" or ROLE == "client" then
+            okB, errB = pcall(undoUnwantedSeats)
+            if not okB then log("seat error: %s", tostring(errB)) end
+        end
+        if ROLE == "client" then
+            okB, errB = pcall(placeTick)
+            if not okB then log("place error: %s", tostring(errB)) end
+        end
         okB, errB = pcall(bodyAnimTick)
         if not okB then log("bodyanim error: %s", tostring(errB)) end
         if ROLE == "host" or ROLE == "client" then

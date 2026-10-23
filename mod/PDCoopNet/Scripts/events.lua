@@ -13,10 +13,13 @@ return function(ctx)
     local log, valid = ctx.log, ctx.valid
     local M = {}
 
+    -- a kept object is still the one we hooked: after a map change it can be collected and its slot reused by
+    -- another object, which still looks valid (exp175)
+    local function same(o, p) return valid(o) and o:GetFullName():find(p, 1, true) ~= nil end
     local hooks = {}         -- path -> { fn = function object, ids = { pre, post } }
     function M.hookFunction(path, callback)
         local h = hooks[path]
-        if h and valid(h.fn) then return true end
+        if h and same(h.fn, path) then return true end
         local fn = StaticFindObject(path)
         if not valid(fn) then return false end
         if h and h.ids then pcall(UnregisterHook, path, h.ids[1], h.ids[2]) end
@@ -61,6 +64,7 @@ return function(ctx)
     end
 
     function M.hooked() return hooked end
+    M.same = same
 
     -- actors that began play on this machine, counted: a module that searches the whole world (thousands of
     -- actors) does it only when something new appeared since its last search

@@ -22,7 +22,7 @@ return function(ctx)
 
     local markerCls = nil
     local function markerClass()
-        if markerCls and not valid(markerCls) then markerCls = nil end     -- collected after a map change
+        if markerCls and not ctx.same(markerCls, MARKER_CLASS) then markerCls = nil end   -- collected after a map change
         if not markerCls then
             local c = StaticFindObject(MARKER_CLASS)
             if not valid(c) then

@@ -43,7 +43,7 @@ return function(ctx)
     local STEP_NOTIFY = "/Game/AdvancedLocomotionV3/Blueprints/AnimNotifys/Footstep_AnimNotify.Footstep_AnimNotify_C:Received_Notify"
     local assets = {}            -- path -> loaded object (checked before use: collected after a map change)
     local function asset(path)
-        if assets[path] and not valid(assets[path]) then assets[path] = nil end
+        if assets[path] and not ctx.Events.same(assets[path], path:match("^(.-)%.") ) then assets[path] = nil end
         if not assets[path] then
             local a = StaticFindObject(path)
             if not valid(a) then
@@ -60,7 +60,7 @@ return function(ctx)
 
     local function clip(name)
         -- a clip nobody plays any more can be collected (map change): load it again
-        if cache[name] and not valid(cache[name]) then cache[name] = nil end
+        if cache[name] and not ctx.Events.same(cache[name], BASE .. CLIPS[name]) then cache[name] = nil end
         if cache[name] == nil then
             local path = BASE .. CLIPS[name]
             local short = path:match("[^/]+$")

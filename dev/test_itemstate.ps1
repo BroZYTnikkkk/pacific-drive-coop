@@ -18,6 +18,10 @@ $t = WaitFor "client2" "inv trunk" "$can x1 \{F6\.5\}" 12
 $checks["trunk: host's can with 6.5 fuel arrives with 6.5 at the client"] = $t -match "$can x1 \{F6\.5\}"
 # trunk: client -> host (durability)
 Dev "client2" "give $tool 1 trunk" | Out-Null
+# the host's answer to the give can rebuild player 2's trunk: take the slot once the host has the tool (exp150:
+# the state went to a slot that had changed meanwhile, now and then)
+WaitFor "client1" "inv trunk" "$tool x1" 12 | Out-Null
+Start-Sleep 2
 $t = Dev "client2" "inv trunk"
 $slot = [regex]::Match($t, "\[(\d+)\] $tool").Groups[1].Value
 Dev "client2" "setstate trunk $slot D2" | Out-Null

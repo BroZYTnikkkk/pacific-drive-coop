@@ -44,7 +44,7 @@ or the car, in which case they are seated as a passenger). Saved positions and t
   props, barrels, containers, signs...) is sent to player 2 by the engine (`worldrep`, see `docs/WORLD_SYNC.md`):
   player 2 sees what the host sees within 1.5 km; doors and lootable containers are shared. Not yet: trunks of
   abandoned cars, a few doors still stand off for player 2, physics props may sit a little apart, hazards
-  (landmines are not sent, radiation clouds differ) and weather.
+  (landmines are there for player 2 on the refactor branch, their explosions for player 2 are not tested; radiation clouds differ) and weather.
 - **Which parts are installed on the car is not synced** (only their health, fuel, battery): a part taken off or
   put on by one player can look different for the other.
 - **Esc on the host is off while a partner is connected**: the host's pause menu crashed the game natively
@@ -148,7 +148,10 @@ Messages between the host and the other players go through our own replicated ac
 `PDCoopNet.pak` (a small Blueprint-only UE 4.27 project in [`pak/`](pak/README.md), loaded by UE4SS's
 BPModLoaderMod): the host spawns one per remote player, owned by that player's controller, and reliable
 Server / Client RPCs carry the messages over the game's own connection (`channel.lua`). Sync modules react to
-game events where the game has them (items entering or leaving a container: `events.lua`).
+game events where the game has them (items entering or leaving a container, doors: `events.lua`). World items
+cannot be replicated directly (the copy has no item data and the game crashes), so the host gives each one a
+marker of our own (`PDCoopItemMarker`, movement replicated) and player 2's game keeps its own item of that type
+on the marker (`items.lua`).
 
 ## Credits and license
 

@@ -67,5 +67,20 @@ if not unreal.EditorAssetLibrary.does_asset_exist(MAT):
     mel.recompile_material(mat)
     unreal.log("PDCOOP material created")
 
+# SA_PDCoopSteps: the other player's footsteps are played at its feet with this attenuation (the game's own footstep
+# events are 2D: posted on the other player's character they sounded like one's own steps)
+SA = FOLDER + "/SA_PDCoopSteps"
+if not unreal.EditorAssetLibrary.does_asset_exist(SA):
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    sa = tools.create_asset("SA_PDCoopSteps", FOLDER, unreal.SoundAttenuation, unreal.SoundAttenuationFactory())
+    s = sa.get_editor_property("attenuation")
+    s.set_editor_property("attenuate", True)
+    s.set_editor_property("spatialize", True)
+    s.set_editor_property("attenuation_shape", unreal.AttenuationShape.SPHERE)
+    s.set_editor_property("attenuation_shape_extents", unreal.Vector(150.0, 0.0, 0.0))
+    s.set_editor_property("falloff_distance", 2500.0)
+    sa.set_editor_property("attenuation", s)
+    unreal.log("PDCOOP attenuation created")
+
 unreal.EditorAssetLibrary.save_directory(FOLDER, only_if_is_dirty=False)
 unreal.log("PDCOOP assets saved")

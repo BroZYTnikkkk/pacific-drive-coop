@@ -8,6 +8,12 @@
 -- There is no sitting clip in the game. Sitting: a PoseableMeshComponent added to the character copies the idle
 -- pose of the body every tick with the legs bent (thigh -90, calf +90 about the mesh's X axis, component space;
 -- exp157), and is shown instead of the body; main.lua lowers both into the seat.
+--
+-- Footsteps: the clips' Footstep_AnimNotify posts the game's Wwise footstep events on the mesh's owner; those
+-- events are 2D (made for one's own steps), so the other player's steps sounded as if one walked oneself
+-- (playtest). The other characters' Wwise emitter is muted (output bus volume 0: all of their "own player"
+-- sounds), and each footstep notify on them plays the ALS footstep cue at their feet with SA_PDCoopSteps (pak):
+-- spatial, fading out over 25 m.
 return function(ctx)
     local log, valid = ctx.log, ctx.valid
     local M = {}
@@ -32,6 +38,23 @@ return function(ctx)
     local SIT_BEND = { thigh = -90, calf = 90 }
     local posing = {}        -- character full name -> its PoseableMeshComponent while it sits
     local cache = {}
+    local STEP_SOUND = "/Game/AdvancedLocomotionV3/Audio/Footsteps/Footstep_Cue.Footstep_Cue"
+    local STEP_ATTENUATION = "/Game/Mods/PDCoopNet/SA_PDCoopSteps.SA_PDCoopSteps"
+    local STEP_NOTIFY = "/Game/AdvancedLocomotionV3/Blueprints/AnimNotifys/Footstep_AnimNotify.Footstep_AnimNotify_C:Received_Notify"
+    local assets = {}            -- path -> loaded object (checked before use: collected after a map change)
+    local function asset(path)
+        if assets[path] and not valid(assets[path]) then assets[path] = nil end
+        if not assets[path] then
+            local a = StaticFindObject(path)
+            if not valid(a) then
+                local arh = StaticFindObject("/Script/AssetRegistry.Default__AssetRegistryHelpers")
+                pcall(function() a = arh:GetAsset({ ObjectPath = ctx.UEHelpers.FindOrAddFName(path) }) end)
+            end
+            assets[path] = valid(a) and a or nil
+        end
+        return assets[path]
+    end
+    local muted = {}             -- AkComponent full name -> true
     local state = {}         -- character full name -> { clip, rate }
     local missingLogged = {}
 
@@ -135,8 +158,62 @@ return function(ctx)
         return s ~= nil and s.clip == "sit" and valid(posing[ch:GetFullName()])
     end
 
+    -- the other characters' Wwise emitter: muted
+    local AKCLASS = nil
+    local function muteWwise(ch)
+        AKCLASS = (AKCLASS and valid(AKCLASS)) and AKCLASS or StaticFindObject("/Script/AkAudio.AkComponent")
+        if not valid(AKCLASS) then return end
+        for _, e in ipairs(ch:K2_GetComponentsByClass(AKCLASS) or {}) do
+            local c = e:get()
+            local name = c:GetFullName()
+            if not muted[name] then
+                local ok = pcall(function() c:SetOutputBusVolume(0.0) end)
+                muted[name] = true
+                log("BODYANIM %s: its Wwise sounds muted (ok=%s)", ch:GetFName():ToString(), tostring(ok))
+            end
+        end
+    end
+    -- a footstep of the other character: the cue at its feet. The notify can run off the game thread (exp161/162:
+    -- calling game functions in the hook hung player 2's game at the first step): the hook only queues the mesh, a
+    -- 50 ms game-thread loop plays the sound.
+    local stepQueue = {}
+    local stepsLogged = {}       -- character full name -> footsteps played (the first few are logged)
+    local function onFootstep(_, meshp)
+        local okM, mesh = pcall(function() return meshp:get() end)
+        if okM and mesh and #stepQueue < 16 then stepQueue[#stepQueue + 1] = mesh end
+    end
+    local function playStep(mesh)
+        if not valid(mesh) then return end
+        local owner = mesh:GetOwner()
+        if not (valid(owner) and state[owner:GetFullName()]) then return end      -- only the bodies animated here
+        local snd, att = asset(STEP_SOUND), asset(STEP_ATTENUATION)
+        if not snd then return end
+        local ok, err = pcall(function()
+            local GS = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+            GS:SpawnSoundAtLocation(owner, snd, mesh:K2_GetComponentLocation(), {}, 0.8, 1.0, 0.0, att, nil, true)
+        end)
+        local key = owner:GetFullName()
+        stepsLogged[key] = (stepsLogged[key] or 0) + 1
+        if stepsLogged[key] <= 3 or not ok then
+            log("BODYANIM %s: footstep %d at its feet (attenuation %s) ok=%s %s", owner:GetFName():ToString(), stepsLogged[key],
+                tostring(att ~= nil), tostring(ok), ok and "" or tostring(err))
+        end
+    end
+
+    LoopInGameThreadWithDelay(50, function()
+        if #stepQueue == 0 then return end
+        local batch = stepQueue
+        stepQueue = {}
+        for _, mesh in ipairs(batch) do
+            local ok, err = pcall(playStep, mesh)
+            if not ok then log("BODYANIM footstep error: %s", tostring(err)) end
+        end
+    end)
+
     function M.tick(characters)
+        ctx.Events.hookFunction(STEP_NOTIFY, onFootstep)
         for _, ch in ipairs(characters) do
+            pcall(muteWwise, ch)
             local key = ch:GetFullName()
             local name, rate = pick(ch)
             local a = clip(name)
@@ -177,6 +254,6 @@ return function(ctx)
         if valid(posing[key]) then pcall(function() posing[key]:SetVisibility(false, false) end) end
     end
 
-    function M.reset() state = {}; cache = {}; posing = {} end
+    function M.reset() state = {}; cache = {}; posing = {}; muted = {} end
     return M
 end

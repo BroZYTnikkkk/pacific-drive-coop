@@ -611,7 +611,7 @@ local Downed = require("downed")({
 
 -- the other player's body animation: walk, run, crouch, jump, lying when down, sitting (bodyanim.lua)
 local BodyAnim = require("bodyanim")({
-    log = log, valid = valid, UEHelpers = UEHelpers, isCar = isCar,
+    log = log, valid = valid, UEHelpers = UEHelpers, isCar = isCar, Events = Events,
     isDown = function(ch) return feature("downed") and Downed.isDown(ch) end,
 })
 bodySitting = function(ch) return BodyAnim.isSitting(ch) end

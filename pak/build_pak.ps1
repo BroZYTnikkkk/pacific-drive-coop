@@ -12,6 +12,8 @@ $editor = Join-Path $Engine "Engine\Binaries\Win64\UE4Editor-Cmd.exe"
 $unrealPak = Join-Path $Engine "Engine\Binaries\Win64\UnrealPak.exe"
 $out = Join-Path $here "out"
 New-Item -ItemType Directory -Force $out | Out-Null
+# the editor starts adb.exe when it finds an Android SDK (and it crashed with an error box): not for this build
+Remove-Item Env:ANDROID_HOME, Env:ANDROID_SDK_ROOT, Env:ANDROID_NDK_ROOT -ErrorAction SilentlyContinue
 
 if ($MakeAssets) {
     & $editor $proj -run=pythonscript -script="$here\make_assets.py" -unattended -nop4 -nosplash | Out-Null

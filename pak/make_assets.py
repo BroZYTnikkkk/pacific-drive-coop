@@ -31,5 +31,23 @@ for prop, value in (
     cdo.set_editor_property(prop, value)
     unreal.log("PDCOOP %s = %s" % (prop, cdo.get_editor_property(prop)))
 
+# M_PDCoopBody: the remote players' body material (the game's mannequin has none of its own in the cooked game);
+# one colour parameter so each player gets their own colour (MaterialInstanceDynamic from Lua)
+MAT = FOLDER + "/M_PDCoopBody"
+if not unreal.EditorAssetLibrary.does_asset_exist(MAT):
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    mat = tools.create_asset("M_PDCoopBody", FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    mel = unreal.MaterialEditingLibrary
+    color = mel.create_material_expression(mat, unreal.MaterialExpressionVectorParameter, -400, 0)
+    color.set_editor_property("parameter_name", "Color")
+    color.set_editor_property("default_value", unreal.LinearColor(0.8, 0.35, 0.1, 1.0))
+    mel.connect_material_property(color, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    rough = mel.create_material_expression(mat, unreal.MaterialExpressionConstant, -400, 200)
+    rough.set_editor_property("r", 0.6)
+    mel.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    mat.set_editor_property("used_with_skeletal_mesh", True)
+    mel.recompile_material(mat)
+    unreal.log("PDCOOP material created")
+
 unreal.EditorAssetLibrary.save_directory(FOLDER, only_if_is_dirty=False)
 unreal.log("PDCOOP assets saved")

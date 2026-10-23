@@ -23,6 +23,7 @@
 return function(ctx)
     local log, valid, UEHelpers = ctx.log, ctx.valid, ctx.UEHelpers
     local IS = ctx.ItemState
+    local EV = ctx.Events       -- takeDirty(container): the container changed since the last call
     local on = ctx.feature      -- on("trunk"), on("carstate"), on("refuel"), on("invsave")
     local M = {}
     local DIR = "ue4ss/Mods/PDCoopNet/"
@@ -263,9 +264,9 @@ return function(ctx)
         if ck == "" then host.clientsKey = ""; return end
         local fresh = ck ~= host.clientsKey
         host.clientsKey = ck
-        -- trunk
+        -- trunk: only when items went in or out (or the last list is void: the host answers every TRUNKD)
         local t = on("trunk") and trunk() or nil
-        if t then
+        if t and (EV.takeDirty(t) or fresh or host.trunkText == nil) then
             local text = entriesText(containerEntries(t))
             if fresh or text ~= host.trunkText then
                 host.trunkText = text
@@ -480,7 +481,11 @@ return function(ctx)
         for k, v in pairs(vals) do
             cl.carHost[k] = v
             local e = comps[k]
-            if e then
+            -- a refuel / charge by player 2 not sent yet: the host's older value must not undo it before the client
+            -- tick measures it (exp127: the charge came back as 5 -> 5; CARST arrives at once with the new channel)
+            if add.flag[k:sub(1, 1)] then
+                -- left as it is here
+            elseif e then
                 local cur = compValue(e)
                 -- the gas cap holds whole litres only (writing 19.5 keeps 19): do not fight it over less than 1
                 local tol = k:find("GasCap", 1, true) and 1.0 or 0.05
@@ -540,9 +545,9 @@ return function(ctx)
             ctx.sendCommand("HELLO," .. playerId())
             log("CARSYNC HELLO sent as %s", playerId())
         end
-        -- trunk: local changes -> host
+        -- trunk: local changes -> host, when items went in or out here
         local t = on("trunk") and trunk() or nil
-        if cl.trunkActive and t then
+        if cl.trunkActive and t and EV.takeDirty(t) then
             local d, now = trunkDeltaText(t)
             if d then
                 ctx.sendCommand("TRUNKD," .. d)
@@ -598,9 +603,22 @@ return function(ctx)
                 log("CARSYNC client car increase sent: %s", table.concat(ups, ";"))
             end
         end
-        -- inventory: save on the host when it changes (at most every 5 s), after the saved one was loaded
-        if on("invsave") and cl.invLoaded and fastTick - cl.invSentTick >= 25 then
+        -- inventory: save on the host when items went in or out of the pockets / hand (at most every 5 s), after
+        -- the saved one was loaded; item state changes (fuel used from a can in the hand) add no item, so a check
+        -- every 30 s catches those
+        if on("invsave") then
+            local m = im()
+            for _, cname in ipairs(PLAYER_CONTAINERS) do
+                local cont = nil
+                pcall(function() cont = m[cname] end)
+                if valid(cont) and EV.takeDirty(cont) then cl.invDirty = true end
+            end
+        end
+        if on("invsave") and cl.invLoaded and fastTick - cl.invSentTick >= 25
+            and (cl.invDirty or fastTick - cl.invSentTick >= 150) then
+            cl.invDirty = false
             local text = inventoryText()
+            if fastTick - cl.invSentTick >= 150 then cl.invSentTick = fastTick end
             if text and text ~= cl.invText then
                 cl.invText = text
                 cl.invSentTick = fastTick

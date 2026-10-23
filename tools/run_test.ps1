@@ -16,6 +16,12 @@ if (-not $ModSource) {
     $ModSource = Join-Path $PSScriptRoot "..\mod\PDCoopNet\Scripts\main.lua"
     if (-not (Test-Path $ModSource)) { $ModSource = Join-Path $root "mods-src\PDCoopNet\Scripts\main.lua" }
 }
+# PDCoopNet.pak (the channel actor) into the copy's LogicMods, where UE4SS's BPModLoaderMod finds it
+function Copy-PdcPak($root, $c, $repo) {
+    $dir = Join-Path $root "$c\PenDriverPro\Content\Paks\LogicMods"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    Copy-Item (Join-Path $repo "mod\PDCoopNet\LogicMods\PDCoopNet.pak") $dir -Force
+}
 $bin = "PenDriverPro\Binaries\Win64"
 $roles = @{ client1 = "host`n$Map`n$Scenario"; client2 = "client`n127.0.0.1:7777`n$Scenario" }
 
@@ -24,6 +30,7 @@ Start-Sleep 2
 foreach ($c in "client1", "client2") {
     $mod = Join-Path $root "$c\$bin\ue4ss\Mods\PDCoopNet"
     Copy-Item (Join-Path (Split-Path $ModSource) "*.lua") "$mod\Scripts\" -Force   # main.lua and its modules
+    Copy-PdcPak $root $c (Split-Path $PSScriptRoot)
     Set-Content -Encoding ascii "$mod\role.txt" $roles[$c]
     # PDCoopDev (dev/dev_session.ps1) must not open maps on its own during a test
     Remove-Item (Join-Path $root "$c\$bin\ue4ss\Mods\PDCoopDev\dev.txt") -ErrorAction SilentlyContinue
@@ -206,13 +213,16 @@ if ($Scenario -eq "loot") {
     Select-String -Path $hostLog, $clientLog -Pattern "LOOTTEST|ITEMSYNC (reset|PICKUP|DROP|cannot)|ITEMSYNC client removed|items error|cmd error|CMD (sent|received)" | Select-Object -First 40 | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
 }
 if ($Scenario -eq "channel") {
-    $recv = @(Select-String -Path $clientLog -Pattern "CHAN recv PING seq=\d+ i=(\d+) size=(\d+) intact=true")
-    $acks = @(Select-String -Path $hostLog -Pattern "CHAN acked seq=\d+ bytes=(\d+) after (\d+) ticks")
-    $checks["client received all 10 host messages intact ($($recv.Count))"] = $recv.Count -eq 10
-    $checks["host saw all messages acknowledged, parts included ($($acks.Count) >= 10)"] = $acks.Count -ge 10
+    $recv = @(Select-String -Path $clientLog -Pattern "CHAN recv PING #\d+ i=(\d+) size=(\d+) intact=true")
+    $back = @(Select-String -Path $hostLog -Pattern "CHAN recv PINGBACK i=(\d+) size=(\d+) intact=true")
+    $order = ($recv | ForEach-Object { [int]$_.Matches[0].Groups[1].Value }) -join ","
+    $checks["host opened a channel for the client"] = [bool](Select-String -Path $hostLog -Pattern "CHAN opened PDCoopChannel_C" -Quiet)
+    $checks["client received all 10 host messages intact, up to 200 KB ($($recv.Count))"] = $recv.Count -eq 10
+    $checks["host messages arrived in order ($order)"] = $order -eq "1,2,3,4,5,6,7,8,9,10"
+    $checks["host received all 10 answers from the client intact ($($back.Count))"] = $back.Count -eq 10
+    $checks["no channel errors"] = -not (Select-String -Path $clientLog, $hostLog -Pattern "CHAN (hook .* failed|.* error:|handler|message .* part .* missing|cannot open)" -Quiet)
     Write-Output "===== CHANNEL"
-    $acks | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
-    Select-String -Path $clientLog, $hostLog -Pattern "CHAN (send failed|handler|recv PING .*intact=false)" | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
+    Select-String -Path $clientLog, $hostLog -Pattern "CHAN " | Select-Object -First 50 | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
 }
 if ($Scenario -eq "lootprobe") {
     Write-Output "===== LOOT"
@@ -256,7 +266,7 @@ if ($Scenario -in @("car", "rejoincar")) {
     # exp45: the passenger saw an empty driver's seat (the game hides the driving character, hidden replicates)
     foreach ($side in @(@{ n = "host"; f = $hostLog }, @{ n = "client"; f = $clientLog })) {
         $st = @(Select-String -Path $side.f -Pattern "BODYSTATE\|\w+\|\S+\|seated=true\|hidden=(\w+)\|rendered=(\w+)\|mat=(\w+)")
-        $ok = @($st | Where-Object { $_.Matches[0].Groups[1].Value -eq "false" -and $_.Matches[0].Groups[3].Value -eq "DefaultMaterial" })
+        $ok = @($st | Where-Object { $_.Matches[0].Groups[1].Value -eq "false" -and $_.Matches[0].Groups[3].Value -match "^(DefaultMaterial|MaterialInstanceDynamic_\d+)$" })   # grey, or the player colour (PDCoopNet.pak)
         $rend = @($st | Where-Object { $_.Matches[0].Groups[2].Value -eq "true" })
         $checks["$($side.n): the other player in the car is not hidden and has the body material ($($ok.Count) of $($st.Count) samples, rendered in $($rend.Count))"] = ($st.Count -gt 0) -and ($ok.Count -eq $st.Count)
     }

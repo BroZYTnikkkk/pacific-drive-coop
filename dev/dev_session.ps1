@@ -16,6 +16,12 @@ param(
     # before any team death: after one, a zone opened directly takes no damage)
     [switch]$ResetSave
 )
+# PDCoopNet.pak (the channel actor) into the copy's LogicMods, where UE4SS's BPModLoaderMod finds it
+function Copy-PdcPak($root, $c, $repo) {
+    $dir = Join-Path $root "$c\PenDriverPro\Content\Paks\LogicMods"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    Copy-Item (Join-Path $repo "mod\PDCoopNet\LogicMods\PDCoopNet.pak") $dir -Force
+}
 $bin = "PenDriverPro\Binaries\Win64"
 $repo = Split-Path $PSScriptRoot
 if (-not $ModSource) {
@@ -49,6 +55,7 @@ $clients = @("client1"); if ($Two) { $clients += "client2" }
 foreach ($c in $clients) {
     $mods = Join-Path $Root "$c\$bin\ue4ss\Mods"
     Copy-Item (Join-Path (Split-Path $ModSource) "*.lua") "$mods\PDCoopNet\Scripts\" -Force
+    Copy-PdcPak $Root $c (Split-Path $PSScriptRoot)
     New-Item -ItemType Directory -Force "$mods\PDCoopDev\Scripts" | Out-Null
     Copy-Item $devSource "$mods\PDCoopDev\Scripts\main.lua" -Force
     Remove-Item "$mods\PDCoopDev\cmd.txt", "$mods\PDCoopDev\out.txt" -ErrorAction SilentlyContinue

@@ -13,9 +13,10 @@
 return function(ctx)
     local log, valid = ctx.log, ctx.valid
     local CS = ctx.CarSync
+    local EV = ctx.Events
     local M = {}
     local POPULATE, INTERACTED = "Populate Container", "OnInteractedWith"
-    local hooked = {}
+    local declaring = nil                -- path of the class that declares the hooked functions, once found
     local host = { watched = {} }        -- name -> { lt, text }
     local cl = { open = {} }             -- client: name -> { lt, base (counts), pending = bool }
 
@@ -47,28 +48,15 @@ return function(ctx)
     end
 
     -- hooks on the class that declares the functions (BP_Lootable_Base_C for every lootable)
-    local function hookClass(cls)
-        local declaring = nil
-        for _ = 1, 6 do
-            if not (cls and cls:IsValid()) then break end
-            local path = cls:GetFullName():match("%s(%S+)$")
-            local f = StaticFindObject(path .. ":" .. INTERACTED)
-            if f and f:IsValid() then declaring = path; break end
-            cls = cls:GetSuperStruct()
-        end
-        if not declaring or hooked[declaring] then return end
-        hooked[declaring] = true
+    local function hookDeclaring()
         -- player 2's own roll is emptied right away: the host's items come in a moment
-        pcall(function()
-            RegisterHook(declaring .. ":" .. POPULATE, function(selfp)
+        local okP = EV.hookFunction(declaring .. ":" .. POPULATE, function(selfp)
                 if ctx.role() ~= "client" or not ctx.enabled() then return end
                 local lt = selfp:get()
                 local cont = valid(lt) and container(lt)
                 if cont then pcall(function() cont:RemoveAllItems() end) end
             end)
-        end)
-        local ok, err = pcall(function()
-            RegisterHook(declaring .. ":" .. INTERACTED, function(selfp)
+        local okI = EV.hookFunction(declaring .. ":" .. INTERACTED, function(selfp)
                 if ctx.role() ~= "client" or not ctx.enabled() then return end
                 local lt = selfp:get()
                 if not valid(lt) then return end
@@ -79,21 +67,31 @@ return function(ctx)
                 ctx.sendCommand("LOOTOPEN," .. key)
                 log("LOOT player 2 opened %s: asked the host", key)
             end)
-        end)
-        log("LOOT hooks on %s: %s", declaring:match("[^.]+$"), ok and "ok" or tostring(err))
+        return okP and okI
+    end
+    local function findDeclaring(cls)
+        for _ = 1, 6 do
+            if not (cls and cls:IsValid()) then return nil end
+            local path = cls:GetFullName():match("%s(%S+)$")
+            local f = StaticFindObject(path .. ":" .. INTERACTED)
+            if f and f:IsValid() then return path end
+            cls = cls:GetSuperStruct()
+        end
     end
 
-    -- every 5 s: hook new lootable classes
+    -- every 5 s: the hooks are in place (the class is loaded again in a new zone); the zone's actors are searched
+    -- for a lootable only until its base class was found once
     function M.discover()
         if not ctx.enabled() then return end
-        local seenClass = {}
+        if declaring then hookDeclaring(); return end
         for _, a in ipairs(FindAllOf("Actor") or {}) do
-            if valid(a) then
-                local c = a:GetClass():GetFName():ToString()
-                if isLootable(c) and not seenClass[c] then
-                    seenClass[c] = true
-                    hookClass(a:GetClass())
+            if valid(a) and isLootable(a:GetClass():GetFName():ToString()) then
+                declaring = findDeclaring(a:GetClass())
+                if declaring then
+                    log("LOOT lootables are %s", declaring:match("[^.]+$"))
+                    hookDeclaring()
                 end
+                return
             end
         end
     end
@@ -103,6 +101,8 @@ return function(ctx)
         if not valid(w.lt) then host.watched[name] = nil; return end
         local cont = container(w.lt)
         if not cont then return end
+        -- only when items went in or out (or the last list is void: the host answers every LOOTD)
+        if not (EV.takeDirty(cont) or force or w.text == nil) then return end
         local text = CS.entriesText(CS.containerEntries(cont))
         if force or text ~= w.text then
             w.text = text
@@ -190,7 +190,7 @@ return function(ctx)
         if not ctx.enabled() then return end
         for name, o in pairs(cl.open) do
             if not valid(o.lt) then cl.open[name] = nil
-            elseif not o.pending and o.base then
+            elseif not o.pending and o.base and container(o.lt) and EV.takeDirty(container(o.lt)) then
                 local d, now = deltaText(o)
                 if d then
                     ctx.sendCommand("LOOTD," .. o.key .. "," .. d)

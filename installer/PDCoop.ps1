@@ -56,6 +56,7 @@ function Find-Game {
 
 function Win64($game) { Join-Path $game "PenDriverPro\Binaries\Win64" }
 function ModDir($game) { Join-Path (Win64 $game) "ue4ss\Mods\PDCoopNet" }
+function PakDir($game) { Join-Path $game "PenDriverPro\Content\Paks\LogicMods" }
 
 function Assert-NotRunning {
     if (Get-Process PenDriverPro-Win64-Shipping -ErrorAction SilentlyContinue) { throw "Close Pacific Drive first." }
@@ -132,6 +133,19 @@ function Install-Mod($game, $zip) {
     # before UE4SS's own "; Built-in keybinds, do not move up!" comment, else before "Keybinds : 1"
     $i = -1; for ($k = 0; $k -lt $lines.Count; $k++) { if ($lines[$k] -match "^\s*;\s*Built-in keybinds" -or $lines[$k] -match "^\s*Keybinds\s*:") { $i = $k; break } }
     if ($i -lt 0) { $lines += "PDCoopNet : 1" } else { $lines = @($lines[0..($i - 1)]) + "PDCoopNet : 1" + @($lines[$i..($lines.Count - 1)]) }
+    # the channel actor: PDCoopNet.pak in the game's LogicMods, loaded by UE4SS's BPModLoaderMod
+    $pak = Join-Path $dir "LogicMods\PDCoopNet.pak"
+    if (-not (Test-Path $pak)) { throw "PDCoopNet.pak missing in the mod zip" }
+    $logic = PakDir $game
+    New-Item -ItemType Directory -Force $logic | Out-Null
+    Copy-Item $pak $logic -Force
+    if (@($lines | Where-Object { $_ -match "^\s*BPModLoaderMod\s*:" }).Count -eq 0) {
+        $i = -1; for ($k = 0; $k -lt $lines.Count; $k++) { if ($lines[$k] -match "^\s*PDCoopNet\s*:") { $i = $k; break } }
+        $before = @(); if ($i -gt 0) { $before = @($lines[0..($i - 1)]) }
+        $lines = $before + "BPModLoaderMod : 1" + @($lines[$i..($lines.Count - 1)])
+    } else {
+        $lines = @($lines | ForEach-Object { if ($_ -match "^\s*BPModLoaderMod\s*:") { "BPModLoaderMod : 1" } else { $_ } })
+    }
     Set-Content -Encoding ascii $mt $lines
     $ver = "?"; if (Test-Path (Join-Path $dir "version.txt")) { $ver = (Get-Content (Join-Path $dir "version.txt") -TotalCount 1) }
     Say "  mod $ver installed" Green
@@ -229,6 +243,8 @@ function Do-Logs {
         Add "UE4SS: $(if (Test-Path (Join-Path $w 'ue4ss\UE4SS.dll')) { (Get-Item (Join-Path $w 'ue4ss\UE4SS.dll')).VersionInfo.FileVersion } else { 'not installed' })"
         Add "Mod: $(if (Test-Path (Join-Path $dir 'version.txt')) { Get-Content (Join-Path $dir 'version.txt') -TotalCount 1 } else { 'not installed' })"
         Add "Game exe: $((Get-Item (Join-Path $w 'PenDriverPro-Win64-Shipping.exe')).LastWriteTime)"
+        $pak = Join-Path (PakDir $game) "PDCoopNet.pak"
+        Add "Pak: $(if (Test-Path $pak) { Sha256 $pak } else { 'not installed' })"
         foreach ($f in "role.txt", "features.txt") { Add "--- $f"; Add (Tail (Join-Path $dir $f) 20) }
         Add "--- mods.txt"; Add (Tail (Join-Path $w "ue4ss\Mods\mods.txt") 40)
         Add "===== UE4SS.log (last 1500 lines)"; Add (Tail (Join-Path $w "ue4ss\UE4SS.log") 1500)
@@ -260,6 +276,8 @@ function Do-Uninstall {
     $w = Win64 $game
     $dir = ModDir $game
     if (Test-Path $dir) { Remove-Item $dir -Recurse -Force; Say "  mod removed" Green }
+    $pak = Join-Path (PakDir $game) "PDCoopNet.pak"
+    if (Test-Path $pak) { Remove-Item $pak -Force; Say "  PDCoopNet.pak removed" Green }
     $mt = Join-Path $w "ue4ss\Mods\mods.txt"
     if (Test-Path $mt) { Set-Content -Encoding ascii $mt @(Get-Content $mt | Where-Object { $_ -notmatch "^\s*PDCoopNet\s*:" }) }
     if ((Read-Host "Remove UE4SS too (other UE4SS mods stop working)? y/n") -match "^[yY]") {

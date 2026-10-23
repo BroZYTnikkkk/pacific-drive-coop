@@ -33,4 +33,6 @@ $pak = Join-Path $out "PDCoopNet.pak"
 & $unrealPak $pak -create="$list" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "UnrealPak failed ($LASTEXITCODE)" }
 & $unrealPak $pak -list
+# the mod ships it (installer and test scripts copy it into the game's LogicMods)
+Copy-Item $pak (Join-Path (Split-Path $here) "mod\PDCoopNet\LogicMods\PDCoopNet.pak") -Force
 Get-FileHash $pak -Algorithm SHA256 | ForEach-Object { "SHA256 $($_.Hash)" }

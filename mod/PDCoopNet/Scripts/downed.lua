@@ -424,6 +424,22 @@ return function(ctx)
         end
     end
 
+    -- is this character down? (the body lies on the ground for the other player)
+    function M.isDown(ch)
+        local okP, pid = pcall(function() return ch.PlayerState.PlayerId end)
+        if ctx.role() == "host" then
+            local remote = false
+            pcall(function() remote = valid(ch.Controller) and not ch.Controller:IsLocalController() end)
+            if not remote then return host.down.host ~= nil end
+            return okP and (host.down[pid] ~= nil or host.down[tostring(pid)] ~= nil)
+        end
+        local set = M.otherDown or {}
+        if okP and pid ~= nil and set[tostring(pid)] then return true end
+        -- the host's character on the client: a simulated character (two players: the only one)
+        local okR, r = pcall(function() return ch.Role end)
+        return set.host == true and okR and r == 1
+    end
+
     -- a new map: the team death is over (garage), downs are possible again
     function M.mapChanged(worldName)
         if me.dying then log("DOWNED new map %s after the team death", tostring(worldName)) end

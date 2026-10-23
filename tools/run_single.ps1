@@ -9,12 +9,19 @@ param(
     [string]$Root = "C:\PDCoop",
     [string]$ModSource = ""
 )
+# PDCoopNet.pak (the channel actor) into the copy's LogicMods, where UE4SS's BPModLoaderMod finds it
+function Copy-PdcPak($root, $c, $repo) {
+    $dir = Join-Path $root "$c\PenDriverPro\Content\Paks\LogicMods"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    Copy-Item (Join-Path $repo "mod\PDCoopNet\LogicMods\PDCoopNet.pak") $dir -Force
+}
 $bin = "PenDriverPro\Binaries\Win64"
 if (-not $ModSource) { $ModSource = Join-Path $Root "mods-src\PDCoopNet\Scripts\main.lua" }
 Get-Process PenDriverPro-Win64-Shipping -ErrorAction SilentlyContinue | Stop-Process -Confirm:$false
 Start-Sleep 2
 $mod = Join-Path $Root "client1\$bin\ue4ss\Mods\PDCoopNet"
 Copy-Item (Join-Path (Split-Path $ModSource) "*.lua") "$mod\Scripts\" -Force
+Copy-PdcPak $Root "client1" (Split-Path $PSScriptRoot)
 Set-Content -Encoding ascii "$mod\role.txt" "host`n$Map`n$Scenario"
 $log = Join-Path $Root "client1\$bin\ue4ss\UE4SS.log"
 Remove-Item $log -ErrorAction SilentlyContinue

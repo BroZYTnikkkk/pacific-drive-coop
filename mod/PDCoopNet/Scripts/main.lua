@@ -35,7 +35,7 @@ local ROLE, ARG, SCENARIO = readRole()
 -- zone content: abandoned cars, props, barrels... replicated to player 2), doors (zone doors open / closed as on
 -- the host, player 2's E on a door runs on the host), loot (lootable containers hold the host's items).
 local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true,
-                   worldrep = true, doors = true, loot = true }
+                   worldrep = true, doors = true, loot = true, bodyanim = true, bodycolor = true }
 do
     local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
     if f then
@@ -118,10 +118,44 @@ end
 -- controller, so the old check showed the host its own body in the driver's seat. Mine = the pawn of my
 -- controller or the character my BP_MainCharacterManager points at.
 -- Characters sitting in a car are lowered (there is no sitting animation) and do not collide with the car.
-local BODY_MATERIAL = "/Engine/EngineMaterials/DefaultMaterial.DefaultMaterial"
+local BODY_MATERIAL = "/Engine/EngineMaterials/DefaultMaterial.DefaultMaterial"     -- without PDCoopNet.pak
+-- our body material (PDCoopNet.pak) with one colour per player: the host orange, player 2 blue, then green, purple
+local BODY_COLOR_MATERIAL = "/Game/Mods/PDCoopNet/M_PDCoopBody.M_PDCoopBody"
+local BODY_COLORS = { { R = 0.85, G = 0.35, B = 0.05, A = 1 }, { R = 0.1, G = 0.35, B = 0.9, A = 1 },
+                      { R = 0.15, G = 0.7, B = 0.2, A = 1 }, { R = 0.55, G = 0.15, B = 0.75, A = 1 } }
 local SEATED_DROP = 50       -- uu the mannequin mesh is lowered while sitting in a car
 local bodies = {}            -- character full name -> body state
 local bodyMat = nil
+local bodyColorMat = nil     -- false: not in the pak
+-- checked every time: nothing of ours references the loaded asset, so it is collected after a map change (exp132:
+-- player 2 crashed after rejoining, a material instance made from the freed material)
+local function bodyColorMaterial()
+    if bodyColorMat and not valid(bodyColorMat) then bodyColorMat = nil end
+    if bodyColorMat == nil then
+        local m = StaticFindObject(BODY_COLOR_MATERIAL)
+        if not valid(m) then
+            local arh = StaticFindObject("/Script/AssetRegistry.Default__AssetRegistryHelpers")
+            pcall(function() m = arh:GetAsset({ ObjectPath = UEHelpers.FindOrAddFName(BODY_COLOR_MATERIAL) }) end)
+        end
+        bodyColorMat = valid(m) and m or false
+        if not bodyColorMat then log("BODY %s not found: grey bodies", BODY_COLOR_MATERIAL) end
+    end
+    return bodyColorMat or nil
+end
+-- 1 = the host, 2.. = the other players by PlayerId
+local function bodyColorIndex(ch)
+    local host = false
+    if ROLE == "host" then
+        pcall(function() host = not (valid(ch.Controller) and not ch.Controller:IsLocalController()) end)
+    else
+        local okR, r = pcall(function() return ch.Role end)
+        host = okR and r == 1
+    end
+    if host then return 1 end
+    local pid = 0
+    pcall(function() pid = ch.PlayerState.PlayerId end)
+    return 2 + (pid % 3)
+end
 
 local function isMyCharacter(ch)
     local name = ch:GetFullName()
@@ -175,14 +209,33 @@ local function updateBodies()
                 end
                 b.state = "own"
             else
-                bodyMat = bodyMat or LoadAsset(BODY_MATERIAL)
                 local cur = mesh:GetMaterial(0)
-                if not (valid(cur) and cur:GetFullName() == bodyMat:GetFullName()) then
-                    mesh:SetMaterial(0, bodyMat)
-                    mesh:SetMaterial(1, bodyMat)
+                -- the colour material belongs to the mesh it was made on
+                local meshAddr = mesh:GetAddress()
+                if b.midMesh ~= meshAddr then b.mid = nil end
+                local want = b.mid
+                if not valid(want) and FEATURES.bodycolor then
+                    local base = bodyColorMaterial()
+                    if base then
+                        local okM, mid = pcall(function() return mesh:CreateDynamicMaterialInstance(0, base, UEHelpers.FindOrAddFName("None")) end)
+                        if okM and valid(mid) then
+                            local ci = bodyColorIndex(ch)
+                            pcall(function() mid:SetVectorParameterValue(UEHelpers.FindOrAddFName("Color"), BODY_COLORS[ci]) end)
+                            b.mid, b.midMesh, want = mid, meshAddr, mid
+                            log("BODY %s colour %d", objName(ch), ci)
+                        end
+                    end
+                end
+                if not valid(want) then
+                    bodyMat = bodyMat or LoadAsset(BODY_MATERIAL)
+                    want = bodyMat
+                end
+                if not (valid(cur) and cur:GetFullName() == want:GetFullName()) then
+                    mesh:SetMaterial(0, want)
+                    mesh:SetMaterial(1, want)
                     mesh:SetCastShadow(true)
                     b.applied = b.applied + 1
-                    log("BODY %s visible (%s), applied %d time(s)%s", objName(ch), BODY_MATERIAL, b.applied,
+                    log("BODY %s visible (%s), applied %d time(s)%s", objName(ch), want:GetFName():ToString(), b.applied,
                         b.applied > 1 and ": the game had reset it" or "")
                 end
                 b.state = "shown"
@@ -468,9 +521,6 @@ local function spawnForRemotePlayers()
 end
 
 -- ---------------------------------------------------------------- car: host drives, client rides
--- Client -> host command channel: the stock reliable Server RPC ServerChangeName carries a tagged string;
--- the host reads it back from the remote PlayerState name. No new RPCs are needed.
-local CMD_PREFIX = "PDCOOP:"
 -- TempSocket_Seat (driver) sits at Y = -45.8 in BP_PlayerCarNew; the mirrored front passenger seat is Y = +45.8
 local PASSENGER_SIDE_OFFSET = 91.6
 local seated = {}          -- remote character full name -> car full name
@@ -488,236 +538,14 @@ local function dist(a, b)
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
--- ---------------------------------------------------------------- channels
--- There are no RPCs of our own, so both directions ride on PlayerState names, which the engine replicates:
---   client -> host: the client's name "PDCOOP:<cmd>:<seq>|A=<ack>" (stock reliable RPC ServerChangeName);
---   host -> clients: the host's name "PDW:<seq>:<cmdacks>:<payload>" (GameMode:ChangeName on the host's
---   controller), cmdacks = "<PlayerId>=<last command seq handled>/...".
--- Both sides send one message at a time and wait for the other side's acknowledgement.
--- exp36: messages up to 16 KB arrived intact (~0.6 s round trip); a 60 KB one never arrived, so payloads are
--- kept under 8 KB and a message that is not acknowledged within 5 s is dropped.
-local CHAN_MAX = 8000
-local CHAN_TIMEOUT_TICKS = 25
-
-local function myPlayerId()
-    local pc = localController()
-    local id = nil
-    pcall(function() id = pc.PlayerState.PlayerId end)
-    return id
-end
-
--- client side command queue
-local cmdSeq = 0
-local clientCmd = "NONE:0"
-local clientAck = 0
-local cmdQueue = {}
-local cmdInflight = nil      -- { seq, cmd, tick }
-local hostCmdAcks = {}       -- PlayerId -> seq, as last read from the host's name
-local fastTick = 0           -- 200 ms ticks of the channel loop
-local function publishClientName()
-    local pc = localController()
-    if not valid(pc) then return end
-    pc:ServerChangeName(CMD_PREFIX .. clientCmd .. "|A=" .. clientAck)
-end
-
-local function sendCommand(cmd)
-    table.insert(cmdQueue, cmd)
-end
-
-local function clientCommandTick()
-    if cmdInflight then
-        local acked = hostCmdAcks[myPlayerId() or -1] or 0
-        if acked >= cmdInflight.seq then
-            cmdInflight = nil
-        elseif fastTick - cmdInflight.tick > CHAN_TIMEOUT_TICKS * 2 then
-            log("CMD #%d %s not acknowledged in 10 s, resending", cmdInflight.seq, cmdInflight.cmd)
-            cmdInflight.tick = fastTick
-            publishClientName()
-            return
-        else
-            return
-        end
-    end
-    if #cmdQueue == 0 then return end
-    local cmd = table.remove(cmdQueue, 1)
-    cmdSeq = cmdSeq + 1
-    clientCmd = cmd .. ":" .. cmdSeq
-    cmdInflight = { seq = cmdSeq, cmd = cmd, tick = fastTick }
-    publishClientName()
-    log("CMD sent %s #%d", cmd, cmdSeq)
-end
-
--- host side: commands and acknowledgements from clients
-local lastCmdSeq = {}        -- PlayerId -> last command seq handled
-local clientAcks = {}        -- PlayerController full name -> last host message seq acknowledged
-local function remoteCommands()
-    local out = {}
-    for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
-        if valid(pc) and not pc:IsLocalController() and valid(pc.PlayerState) then
-            local key = pc:GetFullName()
-            local pid = pc.PlayerState.PlayerId
-            local ok, name = pcall(function() return pc.PlayerState:GetPlayerName():ToString() end)
-            if ok and name and name:sub(1, #CMD_PREFIX) == CMD_PREFIX then
-                local cmdPart = name:sub(#CMD_PREFIX + 1):match("^([^|]+)") or ""
-                local ack = tonumber(name:match("|A=(%d+)") or "")
-                if ack then clientAcks[key] = ack end
-                local cmd, seqStr = cmdPart:match("^(.*):(%d+)$")
-                local seq = tonumber(seqStr or "") or 0
-                if cmd and cmd ~= "NONE" and seq > (lastCmdSeq[pid] or 0) then
-                    lastCmdSeq[pid] = seq
-                    table.insert(out, { pc = pc, cmd = cmd, seq = seq })
-                end
-            end
-        end
-    end
-    return out
-end
-
-local hostOut = { queue = {}, seq = 0, inflight = nil, sentTick = 0, payload = "", acksText = "" }
--- A message over CHAN_MAX goes as parts "PART|<i>|<n>|<piece>" (a full trunk or inventory with item states can
--- pass 8 KB); messages arrive one at a time and in order, the client joins the parts and handles the whole.
-local partSeq = 0
-local function hostSend(payload)
-    if #payload <= CHAN_MAX then
-        table.insert(hostOut.queue, payload)
-        return
-    end
-    local size = CHAN_MAX - 40
-    local n = math.ceil(#payload / size)
-    partSeq = partSeq + 1
-    for i = 1, n do
-        table.insert(hostOut.queue, string.format("PART|%d|%d|%d|%s", partSeq, i, n, payload:sub((i - 1) * size + 1, i * size)))
-    end
-    log("CHAN message of %d bytes sent in %d parts", #payload, n)
-end
-
--- a message that replaces a queued one of the same kind (full-state messages: only the newest matters)
-local function hostSendLatest(payload)
-    local kind = payload:match("^([^|]+)|")
-    for i, q in ipairs(hostOut.queue) do
-        if q:match("^([^|]+)|") == kind then hostOut.queue[i] = payload; return end
-    end
-    hostSend(payload)
-end
-
-local function cmdAcksText()
-    local parts = {}
-    for pid, seq in pairs(lastCmdSeq) do table.insert(parts, pid .. "=" .. seq) end
-    table.sort(parts)
-    return table.concat(parts, "/")
-end
-
-local function publishHostName()
-    local gm = UEHelpers.GetGameModeBase()
-    local ok, err = pcall(function()
-        gm:ChangeName(localController(), "PDW:" .. hostOut.seq .. ":" .. hostOut.acksText .. ":" .. hostOut.payload, false)
-    end)
-    if not ok then log("CHAN publish failed seq=%d: %s", hostOut.seq, tostring(err)) end
-end
-
-local function allClientsAcked(seq)
-    local any = false
-    for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
-        if valid(pc) and not pc:IsLocalController() then
-            any = true
-            if (clientAcks[pc:GetFullName()] or 0) < seq then return false end
-        end
-    end
-    return any
-end
-
-local function hostChannelTick()
-    local acks = cmdAcksText()
-    local dirty = acks ~= hostOut.acksText
-    hostOut.acksText = acks
-    if hostOut.inflight then
-        if allClientsAcked(hostOut.inflight.seq) then
-            log("CHAN acked seq=%d bytes=%d after %d ticks", hostOut.inflight.seq, #hostOut.inflight.payload, fastTick - hostOut.sentTick)
-            hostOut.inflight = nil
-        elseif fastTick - hostOut.sentTick == CHAN_TIMEOUT_TICKS then
-            -- keep waiting: a client that is still loading reads the name once it is ready (exp40: dropping the
-            -- first message, IRESET, after 5 s would have left the client without item sync)
-            log("CHAN seq=%d (%d bytes) not acknowledged after 5 s, still waiting", hostOut.inflight.seq, #hostOut.inflight.payload)
-        end
-    end
-    if not hostOut.inflight and #hostOut.queue > 0 then
-        hostOut.payload = table.remove(hostOut.queue, 1)
-        hostOut.seq = hostOut.seq + 1
-        hostOut.inflight = { seq = hostOut.seq, payload = hostOut.payload }
-        hostOut.sentTick = fastTick
-        dirty = true
-    end
-    if dirty then publishHostName() end
-end
-
-local hostMsgHandlers = {}   -- kind -> function(rest, seq)
-local lastHostSeq = 0
-local lastHostPs = ""         -- a new host PlayerState (map change, new host session) restarts the sequence check
-local function clientChannelTick()
-    local mine = localController()
-    if not valid(mine) then return end
-    local myPs = mine.PlayerState
-    for _, ps in ipairs(FindAllOf("PlayerState") or {}) do
-        if valid(ps) and not (valid(myPs) and ps:GetFullName() == myPs:GetFullName()) then
-            local ok, name = pcall(function() return ps:GetPlayerName():ToString() end)
-            if ok and name and name:sub(1, 4) == "PDW:" then
-                if ps:GetFullName() ~= lastHostPs then lastHostPs = ps:GetFullName(); lastHostSeq = 0 end
-                local seqStr, acks, payload = name:match("^PDW:(%d+):([^:]*):(.*)$")
-                for pid, sq in (acks or ""):gmatch("(%d+)=(%d+)") do hostCmdAcks[tonumber(pid)] = tonumber(sq) end
-                local seq = tonumber(seqStr or "")
-                if seq and seq > lastHostSeq then
-                    lastHostSeq = seq
-                    local kind, rest = payload:match("^([^|]+)|?(.*)$")
-                    local h = hostMsgHandlers[kind or ""]
-                    if h then
-                        local okH, errH = pcall(h, rest or "", seq)
-                        if not okH then log("CHAN handler %s failed: %s", tostring(kind), tostring(errH)) end
-                    else
-                        log("CHAN recv seq=%d kind=%s bytes=%d (no handler)", seq, tostring(kind), #payload)
-                    end
-                    clientAck = seq
-                    publishClientName()
-                end
-            end
-        end
-    end
-end
-
-local partBuf = { id = nil, parts = {} }
-hostMsgHandlers["PART"] = function(rest, seq)
-    local id, i, n, piece = rest:match("^(%d+)|(%d+)|(%d+)|(.*)$")
-    i, n = tonumber(i), tonumber(n)
-    if not id then return end
-    if i == 1 or partBuf.id ~= id then partBuf = { id = id, parts = {} } end
-    partBuf.parts[i] = piece
-    if i < n then return end
-    for k = 1, n do
-        if not partBuf.parts[k] then log("CHAN message %s: part %d missing, dropped", id, k); partBuf = { id = nil, parts = {} }; return end
-    end
-    local payload = table.concat(partBuf.parts)
-    partBuf = { id = nil, parts = {} }
-    local kind, body = payload:match("^([^|]+)|?(.*)$")
-    local h = hostMsgHandlers[kind or ""]
-    if h and kind ~= "PART" then
-        local okH, errH = pcall(h, body or "", seq)
-        if not okH then log("CHAN handler %s failed: %s", tostring(kind), tostring(errH)) end
-    end
-end
-
--- channel test: PING|<i>|<size>|xxx...|END
-hostMsgHandlers["PING"] = function(rest, seq)
-    local i, size, body = rest:match("^(%d+)|(%d+)|(.*)$")
-    local okBody = body and body:sub(-4) == "|END" and (#body - 4) == tonumber(size)
-    log("CHAN recv PING seq=%d i=%s size=%s intact=%s", seq, tostring(i), tostring(size), tostring(okBody))
-end
-local pingQueued = false
-local function queueChannelTest()
-    if pingQueued then return end
-    pingQueued = true
-    local sizes = { 20, 200, 1000, 4000, 7900, 12000, 20000, 20, 20, 20 }   -- 12000 and 20000 go in parts
-    for i, n in ipairs(sizes) do hostSend("PING|" .. i .. "|" .. n .. "|" .. string.rep("x", n) .. "|END") end
-    log("CHAN queued %d test messages", #sizes)
-end
+-- ---------------------------------------------------------------- channel (channel.lua)
+local fastTick = 0           -- 200 ms ticks of the main loop
+local Chan = require("channel")({
+    log = log, valid = valid, objName = objName, UEHelpers = UEHelpers, role = ROLE,
+    localController = function() return localController() end,
+})
+local CHAN_MAX, hostMsgHandlers = Chan.CHAN_MAX, Chan.hostMsgHandlers
+local hostSend, hostSendLatest, sendCommand, myPlayerId = Chan.hostSend, Chan.hostSendLatest, Chan.sendCommand, Chan.myPlayerId
 
 -- ---------------------------------------------------------------- shared world items
 -- The host's world items are the truth. The host sends a diff of its world items every second; each client
@@ -735,6 +563,8 @@ local function archShort(path)
 end
 local function archLoad(short)
     local path = (short:sub(1, 1) == "~") and (ITEM_PREFIX .. short:sub(2)) or short
+    -- a loaded asset can be collected after a map change: load it again then
+    if archCache[path] and not valid(archCache[path]) then archCache[path] = nil end
     if archCache[path] == nil then
         local ok, a = pcall(LoadAsset, path)
         archCache[path] = (ok and valid(a)) and a or false
@@ -745,9 +575,13 @@ end
 -- item state (fuel, charge, durability, health) carried with items (itemstate.lua)
 local ItemState = require("itemstate")({ log = log, valid = valid, feature = feature })
 
+-- game events the sync reacts to (events.lua)
+local Events = require("events")({ log = log, valid = valid })
+ExecuteInGameThread(function() Events.register() end)
+
 -- shared trunk, car part state, player 2's inventory saved on the host (carsync.lua)
 local CarSync = require("carsync")({
-    ItemState = ItemState, feature = feature,
+    ItemState = ItemState, Events = Events, feature = feature,
     role = function() return ROLE end,
     myPlayerId = function() return myPlayerId() end,
     log = log, valid = valid, UEHelpers = UEHelpers, objName = objName, CHAN_MAX = CHAN_MAX,
@@ -780,9 +614,25 @@ local Downed = require("downed")({
     end,
 })
 
+-- the other player's body animation: walk, run, crouch, jump, lying when down, sitting (bodyanim.lua)
+local BodyAnim = require("bodyanim")({
+    log = log, valid = valid, UEHelpers = UEHelpers, isCar = isCar,
+    isDown = function(ch) return feature("downed") and Downed.isDown(ch) end,
+})
+local function bodyAnimTick()
+    if not feature("bodyanim") then return end
+    local others = {}
+    for _, ch in ipairs(FindAllOf(CHARACTER_CLASS) or {}) do
+        if valid(ch) then
+            if isMyCharacter(ch) then BodyAnim.forget(ch) else others[#others + 1] = ch end
+        end
+    end
+    BodyAnim.tick(others)
+end
+
 -- the host's generated zone content replicated to player 2 by the engine (worldrep.lua)
 local WorldRep = require("worldrep")({
-    log = log, valid = valid, isCar = isCar, UEHelpers = UEHelpers,
+    log = log, valid = valid, isCar = isCar, UEHelpers = UEHelpers, CHAN_MAX = CHAN_MAX,
     enabled = function() return feature("worldrep") end,
     hostSend = function(payload) hostSend(payload) end,
     hostMsgHandlers = hostMsgHandlers,
@@ -790,7 +640,7 @@ local WorldRep = require("worldrep")({
 
 -- lootable containers hold the host's items (worldloot.lua)
 local WorldLoot = require("worldloot")({
-    log = log, valid = valid, CarSync = CarSync,
+    log = log, valid = valid, CarSync = CarSync, Events = Events,
     enabled = function() return feature("loot") end,
     role = function() return ROLE end,
     sendCommand = function(cmd) sendCommand(cmd) end,
@@ -869,7 +719,6 @@ local function hostItemsTick()
     if ck ~= hostClientsKey then
         hostClientsKey = ck
         hostKnown = {}
-        hostOut.queue = {}      -- diffs queued for the previous set of clients are stale now
         reset = "IRESET|" .. (UEHelpers.GetWorld():GetFName():ToString())
     end
     local now, ops = {}, {}
@@ -1100,23 +949,20 @@ local function unseatPassenger(pc, car)
     log("UNSEAT %s detached from %s, now at %s (parent=%s)", objName(ch), objName(car), fmtLoc(ch), objName(ch:GetAttachParentActor()))
 end
 
--- client commands, every scenario including play
-local function hostCommandsTick()
-    local cmds = remoteCommands()
-    if #cmds == 0 then return end
+-- client commands, every scenario including play (called from the channel's ServerSend hook)
+Chan.setCommandHandler(function(pc, cmd, seq)
+    local kind, args = cmd:match("^([^,]+),?(.*)$")
+    log("CMD received #%d %s from %s", seq, cmd:sub(1, 120), objName(pc))
     local car = playerCar()
-    for _, rc in ipairs(cmds) do
-        local kind, args = rc.cmd:match("^([^,]+),?(.*)$")
-        log("CMD received #%d %s from %s", rc.seq, rc.cmd:sub(1, 120), objName(rc.pc))
-        if valid(car) and kind == "SEAT" then seatPassenger(rc.pc, car)
-        elseif valid(car) and kind == "UNSEAT" then unseatPassenger(rc.pc, car)
-        elseif kind == "PICKUP" or kind == "DROP" then hostItemCommand(kind, args, rc.pc)
-        elseif not CarSync.hostCommand(kind, args, rc.pc) and not Downed.hostCommand(kind, args, rc.pc)
-            and not WorldDoors.hostCommand(kind, args) and not WorldLoot.hostCommand(kind, args) then
-            log("CMD unknown %s", tostring(kind))
-        end
+    if valid(car) and kind == "SEAT" then seatPassenger(pc, car)
+    elseif valid(car) and kind == "UNSEAT" then unseatPassenger(pc, car)
+    elseif kind == "PICKUP" or kind == "DROP" then hostItemCommand(kind, args, pc)
+    elseif kind == "PINGBACK" then Chan.hostPingBack(args)
+    elseif not CarSync.hostCommand(kind, args, pc) and not Downed.hostCommand(kind, args, pc)
+        and not WorldDoors.hostCommand(kind, args) and not WorldLoot.hostCommand(kind, args) then
+        log("CMD unknown %s", tostring(kind))
     end
-end
+end)
 
 -- The game seats "the player" with PDP_MainCharacter_C.GetCarAttachTransformForCharacter (the driver's seat),
 -- e.g. at the start of a new game it put player 2 into the driver's seat on top of the host (exp26).
@@ -1693,6 +1539,9 @@ local function resetPerMapState(newWorld)
     log("MAPCHANGE %s -> %s", tostring(lastWorld), tostring(newWorld))
     lastWorld = newWorld
     spawnedFor, dedupeState, seated = {}, {}, {}
+    -- the body states hold objects of the old world (materials): a character in the new world can have the same
+    -- name (exp130: player 2 crashed after rejoining, a freed material set on the new body)
+    bodies = {}
     reportedDupes, walking, seatRequested, clientSeated, charTicks, rideTicks = false, false, false, false, 0, 0
     drive.phase, drive.t, drive.mode, drive.startLoc, drive.lastLoc, drive.frames = "wait", 0, "throttle", nil, nil, 0
     if rideLoop then pcall(CancelDelayedAction, rideLoop); rideLoop = nil end
@@ -1702,6 +1551,7 @@ local function resetPerMapState(newWorld)
     pcall(WorldRep.reset)
     pcall(WorldDoors.reset)
     pcall(WorldLoot.reset)
+    pcall(BodyAnim.reset)
     -- one re-host per ARRIVAL, not per map name: after a team death the host comes back to RB_Garage, which it had
     -- already re-hosted earlier in the session, and was left without a listen server (playtest 2026-10-21: player 2
     -- could not rejoin until the host pressed F8). No loop: after the re-host the world is not standalone.
@@ -1986,6 +1836,8 @@ LoopInGameThreadWithDelay(200, function()
     do  -- every 200 ms: a new body gets its material within one tick (exp49: one sample before the 1 s update)
         local okB, errB = pcall(updateBodies)
         if not okB then log("bodies error: %s", tostring(errB)) end
+        okB, errB = pcall(bodyAnimTick)
+        if not okB then log("bodyanim error: %s", tostring(errB)) end
         if ROLE == "host" or ROLE == "client" then
             local okL, errL = pcall(CarSync.lockTick)
             if not okL then log("trunklock error: %s", tostring(errL)) end
@@ -2012,8 +1864,7 @@ LoopInGameThreadWithDelay(200, function()
         end
     end
     if ROLE == "host" then
-        local ok, err = pcall(hostCommandsTick)
-        if not ok then log("commands error: %s", tostring(err)) end
+        local ok, err = true, nil
         if fastTick % 5 == 0 then
             ok, err = pcall(hostItemsTick)
             if not ok then log("items error: %s", tostring(err)) end
@@ -2025,11 +1876,10 @@ LoopInGameThreadWithDelay(200, function()
             ok, err = pcall(WorldRep.hostTick)
             if not ok then log("worldrep error: %s", tostring(err)) end
         end
-        ok, err = pcall(hostChannelTick)
+        ok, err = pcall(Chan.hostTick)
         if not ok then log("chan error: %s", tostring(err)) end
     elseif ROLE == "client" then
-        local ok, err = pcall(clientChannelTick)
-        if not ok then log("chan error: %s", tostring(err)) end
+        local ok, err = true, nil
         if fastTick % 10 == 6 then   -- standalone: no replicated actors, nothing matches
             ok, err = pcall(WorldRep.clientPlaceTick)
             if not ok then log("worldrep error: %s", tostring(err)) end
@@ -2041,10 +1891,11 @@ LoopInGameThreadWithDelay(200, function()
         if fastTick % 5 == 0 then
             ok, err = pcall(clientItemsTick)
             if not ok then log("items error: %s", tostring(err)) end
-            ok, err = pcall(CarSync.clientTick, lastHostPs, fastTick)
+            pcall(Chan.clientChannel)
+            ok, err = pcall(CarSync.clientTick, Chan.hostSession(), fastTick)
             if not ok then log("carsync error: %s", tostring(err)) end
         end
-        ok, err = pcall(clientCommandTick)
+        ok, err = pcall(Chan.clientTick)
         if not ok then log("cmd error: %s", tostring(err)) end
     end
 end)
@@ -2076,7 +1927,7 @@ LoopInGameThreadWithDelay(5000, function()
             end
             step("seathook", registerSeatHook)
             step("seatkeeper", startSeatKeeper)
-            if SCENARIO == "channel" and tick >= 24 then step("chantest", queueChannelTest) end
+            if SCENARIO == "channel" and tick >= 24 then step("chantest", Chan.queueTest) end
             if SCENARIO == "loot" then step("loottest", hostLootTestTick) end
             if CAR_LIKE then
                 step("car", hostCarTick)
@@ -2085,6 +1936,7 @@ LoopInGameThreadWithDelay(5000, function()
                 step("travel", function() hostTravelTick(worldName) end)
             end
         end
+        if ROLE == "host" or ROLE == "client" then step("events", Events.register) end
         if ROLE == "host" then
             step("rehost", function() hostRehostTick(worldName) end)
             step("pausehook", registerPauseHook)

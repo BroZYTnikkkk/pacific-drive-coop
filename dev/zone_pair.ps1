@@ -8,6 +8,12 @@ param(
     [string]$Root = "C:\PDCoop",
     [string]$ModSource = ""
 )
+# PDCoopNet.pak (the channel actor) into the copy's LogicMods, where UE4SS's BPModLoaderMod finds it
+function Copy-PdcPak($root, $c, $repo) {
+    $dir = Join-Path $root "$c\PenDriverPro\Content\Paks\LogicMods"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    Copy-Item (Join-Path $repo "mod\PDCoopNet\LogicMods\PDCoopNet.pak") $dir -Force
+}
 $bin = "PenDriverPro\Binaries\Win64"
 if (-not $ModSource) { $ModSource = Join-Path $Root "mods-src\PDCoopNet\Scripts\main.lua" }
 function Dev($client, $cmd, $t = 40) { (& powershell -NoProfile -File "$PSScriptRoot\dev.ps1" -Client $client -Root $Root -TimeoutSec $t $cmd) -join "`n" }
@@ -24,6 +30,7 @@ Copy-Item "$Root\client1\PenDriverPro\Saved\SaveGames\odsave$Slot.sav" "$Root\cl
 foreach ($c in "client1", "client2") {
     $mods = Join-Path $Root "$c\$bin\ue4ss\Mods"
     Copy-Item (Join-Path (Split-Path $ModSource) "*.lua") "$mods\PDCoopNet\Scripts\" -Force
+    Copy-PdcPak $Root $c (Split-Path $PSScriptRoot)
     New-Item -ItemType Directory -Force "$mods\PDCoopDev\Scripts" | Out-Null
     Copy-Item "$PSScriptRoot\PDCoopDev\Scripts\main.lua" "$mods\PDCoopDev\Scripts\main.lua" -Force
     Remove-Item "$mods\PDCoopDev\cmd.txt", "$mods\PDCoopDev\out.txt", "$mods\PDCoopDev\dev.txt" -ErrorAction SilentlyContinue

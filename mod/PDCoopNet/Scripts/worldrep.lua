@@ -164,7 +164,8 @@ return function(ctx)
         return table.concat(keys, ";"), at
     end
     -- host: everything to a new set of clients, then what is new; nearest to player 2 first; several classes per
-    -- message up to 7 KB (exp102: one class per message made 154 messages, the channel does about 2 a second)
+    -- message up to one channel message (no parts), so each message is usable on its own as it arrives; WFIX is
+    -- bulk traffic in the channel, the players' state goes first
     local function hostSendFixes()
         local key, at = remotePlayers()
         if key == "" then sentKey = ""; return end
@@ -193,7 +194,7 @@ return function(ctx)
         end
         for _, f in ipairs(pending) do
             local add = #f.s + 1 + (groups[f.c] and 0 or #f.c + 2)
-            if size + add > 7000 then flush() end
+            if size + add > ctx.CHAN_MAX - 200 then flush() end
             if not groups[f.c] then groups[f.c] = {}; order[#order + 1] = f.c end
             table.insert(groups[f.c], f.s); size = size + add
             f.sent = true

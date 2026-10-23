@@ -61,5 +61,11 @@ return function(ctx)
     end
 
     function M.hooked() return hooked end
+
+    -- actors that began play on this machine, counted: a module that searches the whole world (thousands of
+    -- actors) does it only when something new appeared since its last search
+    local spawned = 0
+    RegisterBeginPlayPostHook(function() spawned = spawned + 1 end)
+    function M.spawnCount() return spawned end
     return M
 end

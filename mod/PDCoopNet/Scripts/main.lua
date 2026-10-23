@@ -632,7 +632,7 @@ end
 
 -- the host's generated zone content replicated to player 2 by the engine (worldrep.lua)
 local WorldRep = require("worldrep")({
-    log = log, valid = valid, isCar = isCar, UEHelpers = UEHelpers, CHAN_MAX = CHAN_MAX,
+    log = log, valid = valid, isCar = isCar, UEHelpers = UEHelpers, CHAN_MAX = CHAN_MAX, Events = Events,
     enabled = function() return feature("worldrep") end,
     hostSend = function(payload) hostSend(payload) end,
     hostMsgHandlers = hostMsgHandlers,

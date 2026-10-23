@@ -311,16 +311,28 @@ return function(ctx)
         return string.format("%s|%d|%d|%d", c, math.floor(l.X / CELL) + dx, math.floor(l.Y / CELL) + dy,
                              math.floor(l.Z / CELL) + dz)
     end
-    -- every 2 s: an actor coming into relevance stands at the wrong spot until this moves it
+    -- every 2 s when actors arrived or fixes came in, else every 10 s (the engine can reset an attachment without
+    -- a new actor): an actor coming into relevance stands at the wrong spot until this moves it
+    local placeAt = { spawns = -1, fixes = -1, calls = 0 }
     function M.clientPlaceTick()
         if not ctx.enabled() then return end
+        local sc = ctx.Events.spawnCount()
+        placeAt.calls = placeAt.calls + 1
+        if sc == placeAt.spawns and fixCount == placeAt.fixes and placeAt.calls % 5 ~= 0 then return end
+        placeAt.spawns, placeAt.fixes = sc, fixCount
         local okP, moved = pcall(clientPlacement)
         if not okP then log("WORLDREP placement error: %s", tostring(moved))
         elseif moved > 0 then log("WORLDREP client: moved %d attached actor(s) to the host's spot", moved) end
     end
 
+    -- every 5 s, when actors began play since the last search (a replicated twin arrived, or the client's own
+    -- generation built something)
+    local dedupeAt = -1
     function M.clientTick()
         if not ctx.enabled() then return end
+        local sc = ctx.Events.spawnCount()
+        if sc == dedupeAt then return end
+        dedupeAt = sc
         local own = {}
         for _, cls in ipairs({ "ItemWorldManifestation", "Pawn" }) do
             for _, a in ipairs(FindAllOf(cls) or {}) do if valid(a) then own[a:GetFullName()] = true end end
@@ -364,14 +376,19 @@ return function(ctx)
         end
     end
 
-    local worldAddr = nil
+    local worldAddr, scanAt = nil, -1
     function M.hostTick()
         if not ctx.enabled() then return end
         -- the re-host (servertravel <same map>?listen) builds a new world with the same name, and actors placed by
         -- name (BP_Hazard_Landmine_8) get their old names back: forget the old world by its address, not its name
         -- (exp94: 236 landmines skipped as already handled)
         local okW, addr = pcall(function() return ctx.UEHelpers.GetWorld():GetAddress() end)
-        if okW and addr ~= worldAddr then worldAddr = addr; M.reset() end
+        if okW and addr ~= worldAddr then worldAddr = addr; M.reset(); scanAt = -1 end
+        -- the search of the whole world only when actors began play since the last one (zone generation spawns over
+        -- time, storms spawn more); the placement recheck and the fixes go on every tick
+        local sc = ctx.Events.spawnCount()
+        if sc == scanAt then hostRecheck(); hostSendFixes(); return end
+        scanAt = sc
         -- items (main.lua mirrors them), pawns and the player car (synced by the mod) stay as they are
         local own = {}
         for _, cls in ipairs({ "ItemWorldManifestation", "Pawn" }) do

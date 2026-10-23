@@ -10,3 +10,4 @@ worldrep = on    ; the host's zone content (abandoned cars, props, barrels) show
 doors = on       ; zone doors open / closed as on the host; player 2's E on a door runs on the host
 loot = on        ; crates, backpacks, cabinets hold the host's items; what one player takes is gone for both
 bodyanim = on   ; the other player's body walks, runs, crouches, jumps, lies when down, sits in the car
+hazards = on    ; a landmine exploding on the host explodes for player 2 too: player 2's game shows it and computes the damage

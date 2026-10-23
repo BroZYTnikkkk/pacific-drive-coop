@@ -35,7 +35,7 @@ local ROLE, ARG, SCENARIO = readRole()
 -- zone content: abandoned cars, props, barrels... replicated to player 2), doors (zone doors open / closed as on
 -- the host, player 2's E on a door runs on the host), loot (lootable containers hold the host's items).
 local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true,
-                   worldrep = true, doors = true, loot = true, bodyanim = true, bodycolor = true }
+                   worldrep = true, doors = true, loot = true, bodyanim = true, bodycolor = true, hazards = true }
 do
     local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
     if f then
@@ -637,6 +637,15 @@ local WorldLoot = require("worldloot")({
     enabled = function() return feature("loot") end,
     role = function() return ROLE end,
     sendCommand = function(cmd) sendCommand(cmd) end,
+    hostSend = function(payload) hostSend(payload) end,
+    hostMsgHandlers = hostMsgHandlers,
+})
+
+-- hazards hurt player 2 in player 2's own game (hazards.lua)
+local Hazards = require("hazards")({
+    log = log, valid = valid, UEHelpers = UEHelpers, Events = Events,
+    localController = function() return localController() end,
+    enabled = function() return feature("hazards") end,
     hostSend = function(payload) hostSend(payload) end,
     hostMsgHandlers = hostMsgHandlers,
 })
@@ -1624,6 +1633,8 @@ LoopInGameThreadWithDelay(200, function()
         if fastTick % 25 == 3 then   -- every 5 s: zone generation spawns over time, and storms spawn more
             ok, err = pcall(WorldRep.hostTick)
             if not ok then log("worldrep error: %s", tostring(err)) end
+            ok, err = pcall(Hazards.hostTick)
+            if not ok then log("hazards error: %s", tostring(err)) end
         end
         ok, err = pcall(Chan.hostTick)
         if not ok then log("chan error: %s", tostring(err)) end

@@ -264,9 +264,11 @@ return function(ctx)
         if ck == "" then host.clientsKey = ""; return end
         local fresh = ck ~= host.clientsKey
         host.clientsKey = ck
-        -- trunk: only when items went in or out (or the last list is void: the host answers every TRUNKD)
+        -- trunk: when items went in or out (or the last list is void: the host answers every TRUNKD); every 5 s
+        -- also a check for item state changes (fuel, durability), which move no item (exp135)
         local t = on("trunk") and trunk() or nil
-        if t and (EV.takeDirty(t) or fresh or host.trunkText == nil) then
+        host.trunkTicks = (host.trunkTicks or 0) + 1
+        if t and (EV.takeDirty(t) or fresh or host.trunkText == nil or host.trunkTicks % 5 == 0) then
             local text = entriesText(containerEntries(t))
             if fresh or text ~= host.trunkText then
                 host.trunkText = text
@@ -545,9 +547,10 @@ return function(ctx)
             ctx.sendCommand("HELLO," .. playerId())
             log("CARSYNC HELLO sent as %s", playerId())
         end
-        -- trunk: local changes -> host, when items went in or out here
+        -- trunk: local changes -> host, when items went in or out here (and every 5 s for item state changes)
         local t = on("trunk") and trunk() or nil
-        if cl.trunkActive and t and EV.takeDirty(t) then
+        cl.trunkTicks = (cl.trunkTicks or 0) + 1
+        if cl.trunkActive and t and (EV.takeDirty(t) or cl.trunkTicks % 5 == 0) then
             local d, now = trunkDeltaText(t)
             if d then
                 ctx.sendCommand("TRUNKD," .. d)

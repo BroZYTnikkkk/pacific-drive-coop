@@ -1857,6 +1857,7 @@ LoopInGameThreadWithDelay(200, function()
             -- lootable containers: hooks every 5 s, changes every second
             okW, errW = true, nil
             if fastTick % 25 == 17 then okW, errW = pcall(WorldLoot.discover) end
+            if okW and fastTick % 25 == 19 and ROLE == "client" then okW, errW = pcall(WorldLoot.clientCleanup) end
             if okW and fastTick % 5 == 4 then
                 okW, errW = pcall(ROLE == "host" and WorldLoot.hostTick or WorldLoot.clientTick)
             end

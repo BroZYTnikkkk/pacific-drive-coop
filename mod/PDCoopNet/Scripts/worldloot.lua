@@ -201,7 +201,45 @@ return function(ctx)
         end
     end
 
-    function M.reset() host.watched, cl.open = {}, {} end
+    -- player 2's own lootables (built by its own game, not replicated) without a twin of the host's: its prefab
+    -- was generated elsewhere on the host, so the host has nothing to answer for it (exp135: player 2 opened such
+    -- a cooler). Removed once the host's lootables have stopped arriving, as for the doors (worlddoors.lua).
+    local own = { first = {}, repCount = -1, repSince = 0 }
+    function M.clientCleanup()
+        if not ctx.enabled() or ctx.role() ~= "client" or not declaring then return end
+        local now = os.clock()
+        local reps, mine = {}, {}
+        for _, a in ipairs(FindAllOf(declaring:match("[^.]+$")) or {}) do
+            if valid(a) then
+                local okR, role = pcall(function() return a.Role end)
+                if okR and role == 3 then mine[#mine + 1] = a else reps[#reps + 1] = a end
+            end
+        end
+        if #reps ~= own.repCount then own.repCount, own.repSince = #reps, now; return end
+        if now - own.repSince < 10 then return end
+        local removed = 0
+        for _, a in ipairs(mine) do
+            local name = a:GetFullName()
+            own.first[name] = own.first[name] or now
+            if now - own.first[name] >= 30 then
+                local l = a:K2_GetActorLocation()
+                local c = a:GetClass():GetFName():ToString()
+                local twin = false
+                for _, r in ipairs(reps) do
+                    local rl = r:K2_GetActorLocation()
+                    if math.abs(rl.X - l.X) + math.abs(rl.Y - l.Y) + math.abs(rl.Z - l.Z) < 60 and r:GetClass():GetFName():ToString() == c then
+                        twin = true; break
+                    end
+                end
+                if not twin and pcall(function() a:K2_DestroyActor() end) then
+                    removed = removed + 1
+                    log("LOOT removed player 2's own %s at %.0f,%.0f,%.0f: the host has none there", c, l.X, l.Y, l.Z)
+                end
+            end
+        end
+    end
+
+    function M.reset() host.watched, cl.open = {}, {}; own = { first = {}, repCount = -1, repSince = 0 } end
 
     return M
 end

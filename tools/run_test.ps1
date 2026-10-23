@@ -182,7 +182,7 @@ if ($Scenario -in @("gametravel", "lootprobe")) {
 }
 if ($Scenario -eq "loot") {
     $hl = Get-Content $hostLog; $cl = Get-Content $clientLog
-    $checks["client got the host's item list (reset)"] = [bool]($cl | Select-String -Pattern "ITEMSYNC reset from host" -Quiet)
+    $checks["client made its items from the host's markers"] = [bool]($cl | Select-String -Pattern "ITEMSYNC client item .* from its marker" -Quiet)
     $checks["client removed its own local items"] = [bool]($cl | Select-String -Pattern "ITEMSYNC client removed [1-9]\d* local items" -Quiet)
     $spawned = @($hl | Select-String -Pattern "LOOTTEST host spawned (\S+) at (-?\d+),(-?\d+),(-?\d+)")
     $mirrors = @($cl | Select-String -Pattern "LOOTTEST client mirror (\S+) at (-?\d+),(-?\d+),(-?\d+)")
@@ -208,7 +208,7 @@ if ($Scenario -eq "loot") {
     $pkNonScrap = @($pk | Where-Object { $_.Line -notmatch "IA_Resource_Raw_Scrap_Steel" })
     $checks["no false PICKUP of other items ($($pkNonScrap.Count) of $($pk.Count))"] = ($pk.Count -eq 1) -and ($pkNonScrap.Count -eq 0)
     $checks["host picked one up itself"] = [bool]($hl | Select-String -Pattern "LOOTTEST host picks up .* ok=true" -Quiet)
-    $checks["client mirror vanished after the host pickup"] = [bool]($cl | Select-String -Pattern "ITEMSYNC client applied \+0 ~\d+ -[1-9]" -Quiet)
+    $checks["client mirror vanished after the host pickup"] = [bool]($cl | Select-String -Pattern "ITEMSYNC marker of .* gone: local item removed" -Quiet)
     Write-Output "===== LOOT"
     Select-String -Path $hostLog, $clientLog -Pattern "LOOTTEST|ITEMSYNC (reset|PICKUP|DROP|cannot)|ITEMSYNC client removed|items error|cmd error|CMD (sent|received)" | Select-Object -First 40 | ForEach-Object { $_.Line.Substring([Math]::Min(30, $_.Line.Length)) }
 }

@@ -31,6 +31,24 @@ for prop, value in (
     cdo.set_editor_property(prop, value)
     unreal.log("PDCOOP %s = %s" % (prop, cdo.get_editor_property(prop)))
 
+# PDCoopItemMarker: one per host world item (the game's item actors cannot be replicated: player 2's game reads the
+# missing item data of the proxy and crashes, exp143). Movement replicated, nothing to draw, no collision; player 2's
+# own item follows it.
+make_bp("PDCoopItemMarker")
+mk = unreal.get_default_object(unreal.EditorAssetLibrary.load_blueprint_class(FOLDER + "/PDCoopItemMarker"))
+for prop, value in (
+    ("replicates", True),
+    ("replicate_movement", True),
+    ("always_relevant", False),
+    ("net_cull_distance_squared", 2.25e10),
+    ("net_update_frequency", 4.0),
+    ("min_net_update_frequency", 1.0),
+    # not hidden: the engine never replicates a hidden actor without collision (exp144); it has nothing to draw
+    ("hidden", False),
+):
+    mk.set_editor_property(prop, value)
+    unreal.log("PDCOOP marker %s = %s" % (prop, mk.get_editor_property(prop)))
+
 # M_PDCoopBody: the remote players' body material (the game's mannequin has none of its own in the cooked game);
 # one colour parameter so each player gets their own colour (MaterialInstanceDynamic from Lua)
 MAT = FOLDER + "/M_PDCoopBody"

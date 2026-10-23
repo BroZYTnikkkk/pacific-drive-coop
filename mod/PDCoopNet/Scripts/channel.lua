@@ -183,7 +183,17 @@ local function onClientSend(ch, msg)
     end
 end
 
--- messages received, handled in order by the inbox loop: { channel, text }
+-- messages with an actor reference (ServerSendRef / ClientSendRef): the engine maps the reference to the
+-- receiver's own copy of the actor (an item marker: player 2 asks what it is, the host answers about it).
+-- refHandlers[kind](channel, ref, rest); on the host the sender is channel:GetOwner().
+local refHandlers = {}
+local function onRef(ch, ref, msg)
+    local kind, rest = msg:match("^([^|]+)|?(.*)$")
+    local h = refHandlers[kind or ""]
+    if h then h(ch, ref, rest or "") else log("CHAN ref message %s has no handler", tostring(kind)) end
+end
+
+-- messages received, handled in order by the inbox loop: { channel, text, ref (Ref RPCs only) }
 local inbox = {}
 local function drainInbox()
     if #inbox == 0 then return end
@@ -191,7 +201,8 @@ local function drainInbox()
     inbox = {}
     for _, m in ipairs(batch) do
         local okM, errM = pcall(function()
-            if ROLE == "host" then onServerSend(m[1], m[2]) else onClientSend(m[1], m[2]) end
+            if m.ref ~= nil then onRef(m[1], m.ref, m[2])
+            elseif ROLE == "host" then onServerSend(m[1], m[2]) else onClientSend(m[1], m[2]) end
         end)
         if not okM then log("CHAN handle error: %s", tostring(errM)) end
     end
@@ -204,31 +215,41 @@ LoopInGameThreadWithDelay(50, function() drainInbox() end)
 -- exp124/125: after a map change the class is collected and loaded again (the hooked function object is no
 -- longer valid), and the old hook still fires for the new function: the old one is unregistered first, else
 -- every message is handled twice.
-local hookedFn, hookIds = nil, nil
-local function ensureChannelHooks()
-    if valid(hookedFn) then return true end
-    if not channelClass() then return false end
-    local name = ROLE == "host" and "ServerSend" or "ClientSend"
+-- The hook runs inside the engine's packet processing: it only queues; handlers (which spawn actors and load
+-- assets) run from the inbox loop (exp127: a handler that loaded an asset inside the RPC hung player 2).
+local hooks = {}             -- function name -> { fn = function object, ids = { pre, post } }
+local function hookOne(name, withRef)
+    local h = hooks[name]
+    if h and valid(h.fn) then return true end
     local path = CHAN_CLASS .. ":" .. name
     local fn = StaticFindObject(path)
     if not valid(fn) then return false end
-    if hookIds then
-        local okU, errU = pcall(UnregisterHook, path, hookIds[1], hookIds[2])
+    if h and h.ids then
+        local okU, errU = pcall(UnregisterHook, path, h.ids[1], h.ids[2])
         log("CHAN unhooked the old %s: %s %s", name, tostring(okU), tostring(errU or ""))
-        hookIds = nil
     end
-    -- the hook runs inside the engine's packet processing: it only queues; handlers (which spawn actors and load
-    -- assets) run from the inbox loop below (exp127: a handler that loaded an asset inside the RPC hung player 2)
-    local ok, err, postId = pcall(RegisterHook, path, function(self, msg)
+    local ok, err, postId = pcall(RegisterHook, path, function(self, a, b)
         local okM, errM = pcall(function()
-            inbox[#inbox + 1] = { self:get(), msg:get():ToString() }
+            if withRef then
+                local ref = a:get()
+                inbox[#inbox + 1] = { self:get(), b:get():ToString(), ref = ref or false }
+            else
+                inbox[#inbox + 1] = { self:get(), a:get():ToString() }
+            end
         end)
         if not okM then log("CHAN %s error: %s", name, tostring(errM)) end
     end)
-    if not ok then log("CHAN hook %s failed: %s", name, tostring(err)); return false end
-    hookedFn, hookIds = fn, { err, postId }
+    if not ok then hooks[name] = nil; log("CHAN hook %s failed: %s", name, tostring(err)); return false end
+    hooks[name] = { fn = fn, ids = { err, postId } }
     log("CHAN hooked %s", name)
     return true
+end
+local function ensureChannelHooks()
+    if not channelClass() then return false end
+    local plain = hookOne(ROLE == "host" and "ServerSend" or "ClientSend", false)
+    -- an older PDCoopNet.pak has no Ref RPCs: the plain channel still works
+    hookOne(ROLE == "host" and "ServerSendRef" or "ClientSendRef", true)
+    return plain
 end
 
 local function hostEnsureChannels()
@@ -342,5 +363,6 @@ return {
     hostTick = hostChannelTick, clientTick = clientCommandTick,
     clientChannel = clientChannel, hostSession = function() return hostSession end,
     queueTest = queueChannelTest, hostPingBack = hostPingBack,
+    refHandlers = refHandlers,
 }
 end

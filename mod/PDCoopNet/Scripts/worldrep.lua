@@ -389,10 +389,20 @@ return function(ctx)
         local sc = ctx.Events.spawnCount()
         if sc == scanAt then hostRecheck(); hostSendFixes(); return end
         scanAt = sc
-        -- items (main.lua mirrors them), pawns and the player car (synced by the mod) stay as they are
+        -- items (items.lua gives them markers), pawns and the player car (synced by the mod) stay as they are; but
+        -- landmines are item actors without item data (no Instance, also on the host): they cannot get a marker,
+        -- and a replicated one does not crash player 2 (a proxy of an item with data did, exp143). Replicated.
         local own = {}
         for _, cls in ipairs({ "ItemWorldManifestation", "Pawn" }) do
-            for _, a in ipairs(FindAllOf(cls) or {}) do if valid(a) then own[a:GetFullName()] = true end end
+            for _, a in ipairs(FindAllOf(cls) or {}) do
+                if valid(a) then
+                    local hazard = false
+                    if cls == "ItemWorldManifestation" then
+                        pcall(function() hazard = a:GetClass():GetFName():ToString():sub(1, 10) == "BP_Hazard_" and not valid(a.Instance) end)
+                    end
+                    if not hazard then own[a:GetFullName()] = true end
+                end
+            end
         end
         local n, byClass = 0, {}
         for _, a in ipairs(FindAllOf("Actor") or {}) do

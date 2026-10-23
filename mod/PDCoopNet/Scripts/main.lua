@@ -125,6 +125,7 @@ local BODY_COLORS = { { R = 0.85, G = 0.35, B = 0.05, A = 1 }, { R = 0.1, G = 0.
                       { R = 0.15, G = 0.7, B = 0.2, A = 1 }, { R = 0.55, G = 0.15, B = 0.75, A = 1 } }
 local SEATED_DROP = 50       -- uu the mannequin mesh is lowered while sitting in a car
 local bodies = {}            -- character full name -> body state
+local bodySitting = function() return false end   -- set to BodyAnim.isSitting once bodyanim.lua is loaded
 local bodyMat = nil
 local bodyColorMat = nil     -- false: not in the pak
 -- checked every time: nothing of ours references the loaded asset, so it is collected after a map change (exp132:
@@ -249,7 +250,8 @@ local function updateBodies()
                     end
                 end
                 pcall(function() mesh:SetHiddenInGame(false, false) end)
-                pcall(function() mesh:SetVisibility(true, false) end)
+                -- a sitting body shows its poseable copy instead (bodyanim.lua)
+                if not (feature("bodyanim") and bodySitting(ch)) then pcall(function() mesh:SetVisibility(true, false) end) end
             end
             -- sitting in a car
             local seated = false
@@ -612,6 +614,7 @@ local BodyAnim = require("bodyanim")({
     log = log, valid = valid, UEHelpers = UEHelpers, isCar = isCar,
     isDown = function(ch) return feature("downed") and Downed.isDown(ch) end,
 })
+bodySitting = function(ch) return BodyAnim.isSitting(ch) end
 local function bodyAnimTick()
     if not feature("bodyanim") then return end
     local others = {}

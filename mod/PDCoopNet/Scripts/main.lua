@@ -669,6 +669,8 @@ local WorldLoot = require("worldloot")({
 -- hazards hurt player 2 in player 2's own game (hazards.lua)
 local Hazards = require("hazards")({
     log = log, valid = valid, UEHelpers = UEHelpers, Events = Events,
+    playerCar = function() return playerCar() end,
+    passengerRiding = function() return next(seated) ~= nil end,
     localController = function() return localController() end,
     enabled = function() return feature("hazards") end,
     hostSend = function(payload) hostSend(payload) end,
@@ -746,9 +748,33 @@ local function placeOutsidePassengerDoor(ch, car)
     return ch:K2_GetActorLocation()
 end
 
+-- Getting out is the game's to allow: in a cutscene its character manager's AllowExitCar is off (owner's playtest
+-- 2026-10-24: player 2 got out during a cutscene). The host's flag counts for everyone; it goes to player 2 as
+-- "EXITOK|0/1" when it changes and to every new listening player.
+local function exitAllowedHere()
+    local ok, allowed = pcall(function() return managers().AllowExitCar end)
+    return not ok or allowed ~= false
+end
+local exitOkSent, exitOkKey = nil, ""
+local function exitPermissionTick()
+    local key = Chan.readyKey()
+    local now = exitAllowedHere()
+    if key ~= "" and (now ~= exitOkSent or key ~= exitOkKey) then
+        hostSendLatest("EXITOK|" .. (now and "1" or "0"))
+        exitOkSent, exitOkKey = now, key
+        log("SEAT getting out of the car is %s now", now and "allowed" or "not allowed (cutscene)")
+    end
+end
+local hostAllowsExit = true      -- player 2: the host's AllowExitCar
+hostMsgHandlers["EXITOK"] = function(rest) hostAllowsExit = (rest ~= "0") end
+
 local function unseatPassenger(pc, car)
     local ch = pc.Pawn
     if not valid(ch) or className(ch) ~= CHARACTER_CLASS then return end
+    if not exitAllowedHere() then
+        log("UNSEAT %s asked to get out, not allowed now (cutscene): stays", objName(ch))
+        return
+    end
     ch:K2_DetachFromActor(EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld)
     standOnFeet(ch)
     placeOutsidePassengerDoor(ch, car)
@@ -1121,6 +1147,7 @@ local function smoothCarFrame(car)
     local fdt = S.last and math.min(now - S.last, 0.1) or 0
     S.last = now
     local gap = S.cx and math.sqrt((tx - S.cx) ^ 2 + (ty - S.cy) ^ 2 + (tz - S.cz) ^ 2) or math.huge
+    local yawBefore = S.cyaw
     if gap > 500 then
         S.cx, S.cy, S.cz, S.cp, S.cyaw, S.cr = tx, ty, tz, S.pitch, tyaw, S.roll
     else
@@ -1134,6 +1161,18 @@ local function smoothCarFrame(car)
     end
     car:K2_SetActorLocationAndRotation({ X = S.cx, Y = S.cy, Z = S.cz }, { Pitch = S.cp, Yaw = S.cyaw, Roll = S.cr },
         false, {}, true)
+    -- riding: player 2's view turns with the car (it stayed fixed to the world, owner's playtest 2026-10-24); the
+    -- look stays free on top of that
+    if clientSeated and yawBefore and gap <= 500 then
+        local turn = angleDelta(yawBefore, S.cyaw)
+        if turn ~= 0 then
+            local pc = localController()
+            if valid(pc) then
+                local cr = pc:GetControlRotation()
+                pc:SetControlRotation({ Pitch = cr.Pitch, Yaw = cr.Yaw + turn, Roll = cr.Roll })
+            end
+        end
+    end
 end
 -- Player 2's copy of the host's car, from the moment it is there (not only after the first ride): kinematic, its
 -- vehicle simulation off, moved by smoothCarFrame every frame. Left to its own physics with the engine's corrections
@@ -1296,6 +1335,11 @@ local function registerEnterCarHook()
             local wasRiding = clientSeated
             ExecuteInGameThreadWithDelay(600, function()
                 if not valid(ch) then return end
+                -- E while riding in a cutscene: player 2 stays in (its game's own enter just seats it again)
+                if wasRiding and not (hostAllowsExit and exitAllowedHere()) then
+                    log("ENTERCAR E while riding: getting out is not allowed now (cutscene)")
+                    return
+                end
                 -- getting out: the local enter's animation kept running after Exit Car and, when it ended 2 s later,
                 -- put player 2's game back into the in-car state, which keeps it on the seat (exp180)
                 if wasRiding then
@@ -1879,6 +1923,10 @@ LoopInGameThreadWithDelay(200, function()
         if ROLE == "host" or ROLE == "client" then
             okB, errB = pcall(undoUnwantedSeats)
             if not okB then log("seat error: %s", tostring(errB)) end
+            if ROLE == "host" then
+                okB, errB = pcall(exitPermissionTick)
+                if not okB then log("exit permission error: %s", tostring(errB)) end
+            end
         end
         if ROLE == "client" then
             okB, errB = pcall(placeTick)

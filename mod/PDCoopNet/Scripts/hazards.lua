@@ -7,6 +7,13 @@
 -- on player 2's side); the host zeroes damage to characters that are not its own (one health per process), so the
 -- explosion never hurt player 2 (exp152). The host now sends "BOOM|x,y,z" when a mine starts exploding; player 2's
 -- game spawns its own mine there and explodes it: its own effects and its own damage to player 2.
+--
+-- Car crashes: the car's damage controller (BP_CarDispatchController) gives every hit on the car to
+-- EvaluateCarDamageForPlayer, which works out the player's share (LimitDamageToPlayerOverTime) and sends it to "the
+-- player" - on the host that is always the host, so player 2 riding along took nothing (owner's playtest
+-- 2026-10-24). While player 2 rides, the host sends each of these events as "CRASH|<message class>|<damage>" and
+-- player 2's game runs the same function on its copy of the car: its own rules decide the damage to player 2
+-- (in the car, the garage, the limits).
 return function(ctx)
     local log, valid, UEHelpers = ctx.log, ctx.valid, ctx.UEHelpers
     local M = {}
@@ -21,9 +28,34 @@ return function(ctx)
         return valid(c) and c or nil
     end
 
-    -- host: every 5 s the hook is in place (the class loads with a zone that has mines)
+    local DISPATCH = "/Game/Systems/Messages/BP_CarDispatchController.BP_CarDispatchController_C"
+    local MSG_DIR = "/Game/Systems/Messages/"
+    local function shortClass(path)
+        local n = path:match("^" .. MSG_DIR:gsub("%p", "%%%0") .. "([%w_]+)%.%1_C$")
+        return n or path
+    end
+    local function classPath(short)
+        if short:sub(1, 1) == "/" then return short end
+        return MSG_DIR .. short .. "." .. short .. "_C"
+    end
+    local function hookCrashes()
+        if not valid(StaticFindObject(DISPATCH)) then return end
+        ctx.Events.hookFunction(DISPATCH .. ":EvaluateCarDamageForPlayer", function(selfp, msgp)
+            if not ctx.passengerRiding() then return end
+            local okM, cls, dmg = pcall(function()
+                local m = msgp:get()
+                return m:GetClass():GetFullName():match("%s(%S+)$"), m.Damage
+            end)
+            if okM and cls and type(dmg) == "number" and dmg > 0 then
+                ctx.hostSend(string.format("CRASH|%s|%.2f", shortClass(cls), dmg))
+            end
+        end)
+    end
+
+    -- host: every 5 s the hooks are in place (the mine class loads with a zone that has mines)
     function M.hostTick()
         if not ctx.enabled() then return end
+        hookCrashes()
         if not valid(StaticFindObject(MINE)) then return end
         ctx.Events.hookFunction(MINE .. ":StartExplode", function(selfp)
             local okL, l = pcall(function() return selfp:get():K2_GetActorLocation() end)
@@ -83,6 +115,26 @@ return function(ctx)
             log("HAZARD mine of the host exploded %.0f uu from player 2: %.1f damage here ok=%s", d, amount, tostring(ok))
         else
             log("HAZARD mine of the host exploded at %s (%s uu away): effects only", rest, d and string.format("%.0f", d) or "?")
+        end
+    end
+
+    -- player 2: the host's car took a hit while player 2 rides: the same evaluation on player 2's copy of the car
+    local crashLogged = 0
+    ctx.hostMsgHandlers["CRASH"] = function(rest)
+        if not ctx.enabled() then return end
+        local short, dmg = rest:match("^([^|]+)|([%d%.]+)$")
+        if not short then return end
+        local cls = StaticFindObject(classPath(short))
+        local car = ctx.playerCar()
+        if not (valid(cls) and valid(car)) then return end
+        local ok, err = pcall(function()
+            local msg = StaticConstructObject(cls, FindFirstOf("InventorySystem"))
+            msg.Damage = tonumber(dmg)
+            car.DamageDispatchController:EvaluateCarDamageForPlayer(msg)
+        end)
+        if crashLogged < 5 or not ok then
+            crashLogged = crashLogged + 1
+            log("HAZARD car hit on the host (%s %s): evaluated for player 2 here ok=%s %s", short, dmg, tostring(ok), ok and "" or tostring(err))
         end
     end
 

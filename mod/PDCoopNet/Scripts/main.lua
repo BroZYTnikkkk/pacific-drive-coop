@@ -1215,7 +1215,8 @@ local function clientCarTick()
     local ch = pc.Pawn
     local car = playerCar()
     local parent = ch:GetAttachParentActor()
-    if valid(parent) and not clientSeated then
+    local okRP, repParent = pcall(function() return ch.AttachmentReplication.AttachParent end)
+    if valid(parent) and not clientSeated and okRP and valid(repParent) then
         -- Riding. The server attached us; on the client stop our own movement component so it neither predicts
         -- nor gets corrected (the car follows the host's: ensureCarFollow). The seat offset itself comes from the
         -- server's replicated attachment; re-seating locally computed the offset from a bad car transform read
@@ -1303,6 +1304,9 @@ local function placeTick()
     if not valid(pawn) or className(pawn) ~= CHARACTER_CLASS then return end
     local okR, repPar = pcall(function() return pawn.AttachmentReplication.AttachParent end)
     if okR and valid(repPar) and os.clock() - pendingPlace.at < 2 then return end
+    -- the game's exit animation walks to this same spot (LocateSafeExitPoint): let it finish
+    local okT, exiting = pcall(function() return pawn.ExitCarTimeline:IsPlaying() end)
+    if okT and exiting and os.clock() - pendingPlace.at < 3 then return end
     local t = pendingPlace
     pendingPlace = nil
     pcall(function() pawn:K2_DetachFromActor(EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld) end)
@@ -1311,9 +1315,6 @@ local function placeTick()
     if clientSeated then log("RIDE left the car, walking at the host's exit spot") end
     clientSeated = false
     pcall(function() pawn.CharacterMovement:SetComponentTickEnabled(true) end)
-    -- the game's exit animation (2 s, from the mod's Exit Car) walks toward the driver's door and carried player 2
-    -- 400 uu away from this spot after the teleport (exp181)
-    pcall(function() pawn.ExitCarTimeline:Stop() end)
     standOnFeet(pawn)
     -- player 2's own game still had it in the car (the car manager's PlayerCarState 1, left by its local enter) and
     -- put it back on the seat every frame (exp179). The game's own exit event ends that state.
@@ -1323,52 +1324,125 @@ local function placeTick()
         if st ~= 0 then carm:OnPlayerExitCar_Event() end
         return st
     end)
-    pawn:K2_SetActorLocation({ X = t.X, Y = t.Y, Z = t.Z }, false, {}, true)
-    log("SEAT standing where the host put me: %s (car state was %s, exit event ok=%s)", fmtLoc(pawn), tostring(wasIn), tostring(okE))
+    local here = pawn:K2_GetActorLocation()
+    local off = math.sqrt((here.X - t.X) ^ 2 + (here.Y - t.Y) ^ 2 + (here.Z - t.Z) ^ 2)
+    if off > 60 then pawn:K2_SetActorLocation({ X = t.X, Y = t.Y, Z = t.Z }, false, {}, true) end
+    log("SEAT standing where the host put me: %s (%.0f uu off before, car state was %s, exit event ok=%s)", fmtLoc(pawn), off, tostring(wasIn), tostring(okE))
 end
 
--- Player 2 pressing E at the car: its game runs CommandEnterCar locally and seats it in the driver's seat of its
--- copy of the car, with no way out (playtest 2026-10-21; reproduced in a dev session: attached to the car, driver's
--- view). The client undoes that with the game's own Exit Car and asks the host to seat it as passenger (SEAT);
--- pressing E again while riding asks to get out (UNSEAT). Player 2 is always the passenger.
+-- Player 2 gets in and out through the passenger door, played by its own game (owner's playtest 2026-10-24: player 2
+-- jumped to the driver's door, sat down, jumped onto its seat, and the same on the way out). Player 2 is always the
+-- passenger; the host seats it (SEAT / UNSEAT).
+-- In: the door's "enter" interaction only starts an entry on the driver's door (door location 0); on the passenger
+-- door it ends in a debug message. The mod starts the passenger door's own StartEntry there: the door opens, the
+-- character goes in through it, the door shuts. An entry started at the driver's door goes through the passenger
+-- door as well: the door's PickClosestEntryInterpPoint answers with the passenger door's nearest entry point
+-- (exp237). The game's entry stays (no undo any more); the host is asked to seat player 2 once it is done.
+-- Out: the game's exit walks to the car's LocateSafeExitPoint (the driver's side); for player 2 that is the
+-- passenger side spot the host also uses (placeOutsidePassengerDoor), so the exit animation ends where the host
+-- puts player 2. Every exit goes through Exit Car: UNSEAT is sent from there.
+local DOOR_CLASS = "/Game/Gameplay/Inventory/Items/Car/Doors/BP_CarPart_Door_Base.BP_CarPart_Door_Base_C"
+local PLAYER_CAR_CLASS = "/Game/Characters/PlayerCar/BP_PlayerCarNew.BP_PlayerCarNew_C"
+local DOOR_ENTER_EVENT = "BndEvt__Highlight_K2Node_ComponentBoundEvent_1_OnHighlightInteract__DelegateSignature"
+local function passengerDoorOf(car)
+    if not valid(car) then return nil end
+    local carName = car:GetFullName()
+    local c, f, r = car:K2_GetActorLocation(), car:GetActorForwardVector(), car:GetActorRightVector()
+    for _, d in ipairs(FindAllOf("BP_CarPart_Door_Base_C") or {}) do
+        local okP, par = pcall(function() return d:GetAttachParentActor() end)
+        if okP and valid(par) and par:GetFullName() == carName then
+            local l = d:K2_GetActorLocation()
+            local dx, dy = l.X - c.X, l.Y - c.Y
+            if dx * f.X + dy * f.Y > 70 and dx * r.X + dy * r.Y > 40 then return d end
+        end
+    end
+    return nil
+end
+local function nearestEntryPoint(door, from)
+    local best, bestD = nil, math.huge
+    local arrow = StaticFindObject("/Script/Engine.ArrowComponent")
+    for _, c in ipairs(door:K2_GetComponentsByClass(arrow) or {}) do
+        local o = (type(c) == "userdata" and c.get) and c:get() or c
+        if valid(o) and o:GetFName():ToString():find("EntranceLogicPoint", 1, true) then
+            local l = o:K2_GetComponentLocation()
+            local d = (l.X - from.X) ^ 2 + (l.Y - from.Y) ^ 2
+            if d < bestD then best, bestD = o, d end
+        end
+    end
+    return best
+end
 local enterHookDone = false
 local function registerEnterCarHook()
     if enterHookDone or ROLE ~= "client" then return end
     local any = FindFirstOf(CHARACTER_CLASS)
-    if not valid(any) then return end
+    if not valid(any) or not valid(StaticFindObject(DOOR_CLASS)) then return end
     enterHookDone = true
     local cls = any:GetClass():GetFullName():match("%s(%S+)$")
     local ok, err = pcall(function()
         RegisterHook(cls .. ":CommandEnterCar", function(ctx)
             local ch = ctx:get()
             if not valid(ch) or not isMyCharacter(ch) then return end
-            local wasRiding = clientSeated
-            ExecuteInGameThreadWithDelay(600, function()
-                if not valid(ch) then return end
-                -- E while riding in a cutscene: player 2 stays in (its game's own enter just seats it again)
-                if wasRiding and not (hostAllowsExit and exitAllowedHere()) then
+            if clientSeated then
+                -- E while riding: the game starts another entry; out through the passenger door instead
+                if not (hostAllowsExit and exitAllowedHere()) then
                     log("ENTERCAR E while riding: getting out is not allowed now (cutscene)")
                     return
                 end
-                -- getting out: the local enter's animation kept running after Exit Car and, when it ended 2 s later,
-                -- put player 2's game back into the in-car state, which keeps it on the seat (exp180)
-                if wasRiding then
+                ExecuteInGameThreadWithDelay(100, function()
+                    if not valid(ch) then return end
                     for _, tl in ipairs({ "EnterCarTimeline", "EnterCarDipToBlack" }) do
                         pcall(function() ch[tl]:Stop() end)
                     end
-                end
-                local okX, errX = pcall(function() callBPFunction(ch, "Exit Car", false, false) end)
-                if wasRiding then
-                    sendCommand("UNSEAT")
-                    log("ENTERCAR E while riding: local enter undone (ok=%s), UNSEAT sent", tostring(okX))
-                else
-                    sendCommand("SEAT")
-                    log("ENTERCAR E at the car: local enter undone (ok=%s %s), SEAT sent", tostring(okX), okX and "" or tostring(errX))
-                end
+                    local okX = pcall(function() callBPFunction(ch, "Exit Car", false, false) end)
+                    log("ENTERCAR E while riding: getting out through the passenger door (ok=%s)", tostring(okX))
+                end)
+                return
+            end
+            -- the entry (2 s) plays here; seated by the host once it is done (the replicated seat arriving earlier
+            -- would pull player 2 onto the seat in the middle of it)
+            log("ENTERCAR getting in through the passenger door")
+            ExecuteInGameThreadWithDelay(2100, function() sendCommand("SEAT") end)
+        end)
+        RegisterHook(cls .. ":Exit Car", function(ctx)
+            local ch = ctx:get()
+            if not valid(ch) or not isMyCharacter(ch) or not clientSeated then return end
+            sendCommand("UNSEAT")
+            log("ENTERCAR getting out: UNSEAT sent")
+        end)
+        RegisterHook(DOOR_CLASS .. ":" .. DOOR_ENTER_EVENT, function(selfp)
+            local d = selfp:get()
+            local pd = passengerDoorOf(playerCar())
+            if clientSeated or not valid(pd) or d:GetFullName() ~= pd:GetFullName() then return end
+            -- StartEntry(true) (door shut) opens the door and waits for the front LEFT door's angle: never ends on
+            -- the passenger door (exp239). Opened here, StartEntry(false) goes straight into the entry; the entry
+            -- shuts the door again.
+            local okS = pcall(function()
+                d:AttemptOpen()
+                d:StartEntry(false)
             end)
+            log("ENTERCAR E at the passenger door: its entry started ok=%s", tostring(okS))
+        end)
+        RegisterHook(DOOR_CLASS .. ":PickClosestEntryInterpPoint", function(selfp, locp, compp)
+            local pd = passengerDoorOf(playerCar())
+            local me = localController().Pawn
+            if not valid(pd) or not valid(me) or selfp:get():GetFullName() == pd:GetFullName() then return end
+            local p = nearestEntryPoint(pd, me:K2_GetActorLocation())
+            if p then
+                compp:set(p)
+                locp:set(p:K2_GetComponentLocation())
+            end
+        end)
+        RegisterHook(PLAYER_CAR_CLASS .. ":LocateSafeExitPoint", function(selfp, xfp)
+            local car = selfp:get()
+            local l, f, r = car:K2_GetActorLocation(), car:GetActorForwardVector(), car:GetActorRightVector()
+            local p = PASSENGER_EXITS[1]
+            local yaw = math.rad(car:K2_GetActorRotation().Yaw + 90)
+            xfp:set({ Rotation = { X = 0, Y = 0, Z = math.sin(yaw / 2), W = math.cos(yaw / 2) },
+                Translation = { X = l.X + f.X * p[1] + r.X * p[2], Y = l.Y + f.Y * p[1] + r.Y * p[2], Z = l.Z + 25 },
+                Scale3D = { X = 1, Y = 1, Z = 1 } })
         end)
     end)
-    log("ENTERCAR hook %s ok=%s %s", cls .. ":CommandEnterCar", tostring(ok), ok and "" or tostring(err))
+    log("ENTERCAR hooks (passenger door in / out) ok=%s %s", tostring(ok), ok and "" or tostring(err))
 end
 
 local function nudgeHostPawn()

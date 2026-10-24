@@ -96,6 +96,11 @@ local hostChannels = {}      -- remote PlayerController full name -> its channel
 local hostOut = { queue = {}, bulk = {} }
 local hostParts = {}         -- remote PlayerController full name -> part buffers
 local hostCmdSeq = {}        -- remote PlayerController full name -> commands received
+-- remote PlayerController full name -> true once its player listens: its first message (READY) comes after its
+-- ClientSend hook is in place. Before that a message reached its game unheard (playtest exp166: the trunk list
+-- went out at 18:19:40, player 2 hooked its channel at 18:19:47), so nothing goes to it before; the modules send
+-- their full state to a new set of listening players (readyKey).
+local hostReady = {}
 local function hostSend(payload)
     local kind = payload:match("^([^|]+)") or ""
     -- a reset makes the queued bulk of its kind stale (WFIXRESET -> WFIX)
@@ -126,6 +131,11 @@ local function onServerSend(ch, msg)
     local pc = ch:GetOwner()
     if not valid(pc) then return end
     local key = pc:GetFullName()
+    if not hostReady[key] then
+        hostReady[key] = true
+        log("CHAN %s listens now", objName(pc))
+    end
+    if msg == "READY" then return end
     if msg:sub(1, 5) == "PART|" then
         hostParts[key] = hostParts[key] or {}
         msg = joinParts(hostParts[key], msg:sub(6))
@@ -136,7 +146,9 @@ local function onServerSend(ch, msg)
 end
 
 -- client side: my channel, host messages arrive through the ClientSend hook
+local ensureChannelHooks     -- below: hooks ServerSend / ClientSend
 local cmdQueue = {}
+local readySentFor = ""      -- player 2: the channel it said READY on
 local clientParts = {}       -- message id -> parts
 local recvSeq = 0
 local myChannel = nil
@@ -161,9 +173,14 @@ local function sendCommand(cmd)
 end
 
 local function clientCommandTick()
-    if #cmdQueue == 0 then return end
     local ch = clientChannel()
     if not ch then return end    -- not connected yet: the commands wait
+    -- first on every new channel, once host messages are heard: READY (the host sends nothing before it)
+    if readySentFor ~= hostSession and ensureChannelHooks() then
+        readySentFor = hostSession
+        table.insert(cmdQueue, 1, "READY")
+    end
+    if #cmdQueue == 0 then return end
     drain({ cmdQueue }, function(msg)
         ch:ServerSend(msg)
         if msg:sub(1, 5) ~= "PART|" then log("CMD sent %s", msg:sub(1, 120)) end
@@ -247,7 +264,7 @@ local function hookOne(name, withRef)
     log("CHAN hooked %s", name)
     return true
 end
-local function ensureChannelHooks()
+function ensureChannelHooks()
     if not channelClass() then return false end
     local plain = hookOne(ROLE == "host" and "ServerSend" or "ClientSend", false)
     -- an older PDCoopNet.pak has no Ref RPCs: the plain channel still works
@@ -269,7 +286,7 @@ local function hostEnsureChannels()
                 end
                 if valid(ch) then
                     ch:SetOwner(pc)
-                    hostChannels[key] = ch
+                    hostChannels[key], hostReady[key] = ch, nil
                     log("CHAN opened %s for %s", objName(ch), objName(pc))
                 else
                     ready = false
@@ -278,9 +295,19 @@ local function hostEnsureChannels()
         end
     end
     for key in pairs(hostChannels) do
-        if not alive[key] then hostChannels[key], hostParts[key], hostCmdSeq[key] = nil, nil, nil end
+        if not alive[key] then hostChannels[key], hostParts[key], hostCmdSeq[key], hostReady[key] = nil, nil, nil, nil end
     end
     return next(alive) ~= nil, ready
+end
+
+-- the remote players that listen, as one text: a module sends its full state when this changes
+local function readyKey()
+    local keys = {}
+    for key, ch in pairs(hostChannels) do
+        if hostReady[key] and valid(ch) then keys[#keys + 1] = key end
+    end
+    table.sort(keys)
+    return table.concat(keys, ";")
 end
 
 -- bytes sent per message kind, logged once a minute (what to make smaller)
@@ -315,7 +342,10 @@ local function hostChannelTick()
     end
     if #hostOut.queue == 0 and #hostOut.bulk == 0 then return end
     local chans = {}
-    for _, ch in pairs(hostChannels) do table.insert(chans, ch) end
+    for key, ch in pairs(hostChannels) do
+        if hostReady[key] then table.insert(chans, ch) end
+    end
+    if #chans == 0 then return end     -- nobody listens yet: the messages wait
     drain({ hostOut.queue, hostOut.bulk }, function(msg)
         for _, ch in ipairs(chans) do ch:ClientSend(msg) end
         countSent(msg)
@@ -364,7 +394,7 @@ return {
     hostSend = hostSend, hostSendLatest = hostSendLatest, sendCommand = sendCommand, myPlayerId = myPlayerId,
     setCommandHandler = function(fn) handleHostCommand = fn end,
     hostTick = hostChannelTick, clientTick = clientCommandTick,
-    clientChannel = clientChannel, hostSession = function() return hostSession end,
+    clientChannel = clientChannel, hostSession = function() return hostSession end, readyKey = readyKey,
     queueTest = queueChannelTest, hostPingBack = hostPingBack,
     refHandlers = refHandlers,
 }

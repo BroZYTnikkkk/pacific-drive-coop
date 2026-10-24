@@ -247,14 +247,8 @@ return function(ctx)
 
     -- ------------------------------------------------------------ host
     local host = { clientsKey = "", trunkText = nil, car = {}, clientIds = {} }
-    local function clientsKey()
-        local keys = {}
-        for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
-            if valid(pc) and not pc:IsLocalController() then keys[#keys + 1] = pc:GetFullName() end
-        end
-        table.sort(keys)
-        return table.concat(keys, ",")
-    end
+    -- the remote players that listen on the channel (a new one gets the trunk and the car state)
+    local function clientsKey() return ctx.readyKey() end
 
     local function savePath(id) return DIR .. "save_" .. id .. ".txt" end
     local function sanitizeId(id) return (id or ""):gsub("[^%w]", ""):sub(1, 32) end
@@ -472,6 +466,7 @@ return function(ctx)
         end
         cl.trunkBase = countsOf(containerEntries(t))
         cl.trunkActive = true
+        cl.trunkSession = ctx.hostSession()     -- the host session this list belongs to
     end
 
     ctx.hostMsgHandlers["CARST"] = function(rest)
@@ -543,7 +538,10 @@ return function(ctx)
         if hostSession ~= "" and hostSession ~= cl.helloFor then
             cl.helloFor = hostSession
             cl.invLoaded = false
-            cl.trunkActive = false
+            -- a list from an earlier host session does not count; one of this session can come before the HELLO
+            -- (the host sends it as soon as player 2 listens, exp199: HELLO 4 s later wiped it and player 2 never
+            -- sent what it put in the trunk)
+            cl.trunkActive = cl.trunkActive and cl.trunkSession == hostSession
             ctx.sendCommand("HELLO," .. playerId())
             log("CARSYNC HELLO sent as %s", playerId())
         end

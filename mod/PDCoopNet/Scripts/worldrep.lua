@@ -152,16 +152,15 @@ return function(ctx)
         end
         if n > 0 then log("WORLDREP placement: %d actor(s) moved since they were replicated, fixes updated", n) end
     end
+    -- the remote players that listen on the channel (a new one gets every fix) and where they are
     local function remotePlayers()
-        local keys, at = {}, {}
+        local at = {}
         for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
             if valid(pc) and not pc:IsLocalController() then
-                keys[#keys + 1] = pc:GetFullName()
                 pcall(function() if valid(pc.Pawn) then at[#at + 1] = pc.Pawn:K2_GetActorLocation() end end)
             end
         end
-        table.sort(keys)
-        return table.concat(keys, ";"), at
+        return ctx.readyKey(), at
     end
     -- host: everything to a new set of clients, then what is new; nearest to player 2 first; several classes per
     -- message up to one channel message (no parts), so each message is usable on its own as it arrives; WFIX is

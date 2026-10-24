@@ -35,12 +35,13 @@ Start-Sleep 8
 # trunk
 $t = Dev "client2" "inv trunk"
 $checks["client trunk starts like the host's (empty)"] = (Count $t $steel) + (Count $t $copper) -eq 0
+# player 2 first: before any change of the host (the playtest: nothing player 2 put in reached the host, exp199)
+Dev "client2" "give $copper 2 trunk" | Out-Null
+$t = WaitFor "client1" "inv trunk" "$copper x2" 10
+$checks["client puts 2 copper in the trunk first -> host has 2"] = (Count $t $copper) -eq 2
 Dev "client1" "give $steel 3 trunk" | Out-Null
 $t = WaitFor "client2" "inv trunk" "$steel x3" 10
 $checks["host puts 3 steel in the trunk -> client sees 3"] = (Count $t $steel) -eq 3
-Dev "client2" "give $copper 2 trunk" | Out-Null
-$t = WaitFor "client1" "inv trunk" "$copper x2" 10
-$checks["client puts 2 copper in the trunk -> host has 2"] = (Count $t $copper) -eq 2
 Dev "client2" "lua im().Inventory_Trunk:RemoveItemsOfType(arch('$steel'), 1) return 'ok'" | Out-Null
 $t = WaitFor "client1" "inv trunk" "$steel x2" 10
 $checks["client takes 1 steel out -> host has 2"] = (Count $t $steel) -eq 2

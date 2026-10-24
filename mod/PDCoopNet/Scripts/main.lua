@@ -595,6 +595,8 @@ ExecuteInGameThread(function() Events.register() end)
 
 -- shared trunk, car part state, player 2's inventory saved on the host (carsync.lua)
 local CarSync = require("carsync")({
+    readyKey = Chan.readyKey,
+    hostSession = Chan.hostSession,
     ItemState = ItemState, Events = Events, feature = feature,
     role = function() return ROLE end,
     myPlayerId = function() return myPlayerId() end,
@@ -647,6 +649,7 @@ end
 
 -- the host's generated zone content replicated to player 2 by the engine (worldrep.lua)
 local WorldRep = require("worldrep")({
+    readyKey = Chan.readyKey,
     log = log, valid = valid, isCar = isCar, UEHelpers = UEHelpers, CHAN_MAX = CHAN_MAX, Events = Events,
     enabled = function() return feature("worldrep") end,
     hostSend = function(payload) hostSend(payload) end,
@@ -674,6 +677,7 @@ local Hazards = require("hazards")({
 
 -- zone doors follow the host (worlddoors.lua)
 local WorldDoors = require("worlddoors")({
+    readyKey = Chan.readyKey,
     log = log, valid = valid, Events = Events, CHAN_MAX = CHAN_MAX,
     enabled = function() return feature("doors") end,
     role = function() return ROLE end,

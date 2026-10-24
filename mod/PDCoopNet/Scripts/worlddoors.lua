@@ -93,14 +93,8 @@ return function(ctx)
         hookRoots()
     end
 
-    local function remoteKey()
-        local keys = {}
-        for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
-            if valid(pc) and not pc:IsLocalController() then keys[#keys + 1] = pc:GetFullName() end
-        end
-        table.sort(keys)
-        return table.concat(keys, ";")
-    end
+    -- the remote players that listen on the channel (a new one gets every door)
+    local function remoteKey() return ctx.readyKey() end
 
     -- host, every second: the doors an event marked, all of them every 10 s
     function M.hostTick()

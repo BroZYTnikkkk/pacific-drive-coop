@@ -35,7 +35,8 @@ local ROLE, ARG, SCENARIO = readRole()
 -- zone content: abandoned cars, props, barrels... replicated to player 2), doors (zone doors open / closed as on
 -- the host, player 2's E on a door runs on the host), loot (lootable containers hold the host's items).
 local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true,
-                   worldrep = true, doors = true, loot = true, bodyanim = true, bodycolor = true, hazards = true }
+                   worldrep = true, doors = true, loot = true, bodyanim = true, bodycolor = true, hazards = true,
+                   cardoors = true }
 do
     local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
     if f then
@@ -681,6 +682,17 @@ local WorldDoors = require("worlddoors")({
     hostMsgHandlers = hostMsgHandlers,
 })
 
+-- the car's doors and trunk lid, as open / shut events (cardoors.lua)
+local CarDoors = require("cardoors")({
+    log = log, valid = valid, Events = Events,
+    enabled = function() return feature("cardoors") end,
+    role = function() return ROLE end,
+    playerCar = function() return playerCar() end,
+    sendCommand = function(cmd) sendCommand(cmd) end,
+    hostSend = function(payload) hostSend(payload) end,
+    hostMsgHandlers = hostMsgHandlers,
+})
+
 -- the host's world items, local copies on the other players' machines (items.lua)
 local Items = require("items")({
     log = log, valid = valid, same = Events.same, UEHelpers = UEHelpers, ItemState = ItemState,
@@ -713,14 +725,29 @@ end
 
 seatNewPlayerInCar = seatPassenger
 
+-- Outside the passenger door, the driver's exit mirrored: the game puts the driver 48 uu back and 167 uu to the left
+-- of the car, on the ground (exp183). The engine's TeleportTo refuses a spot where the character would stand inside
+-- something; the old spot (320 uu aside, 80 up) was inside the garage's furniture and player 2 could not walk away
+-- (exp191: session test, playtest "stuck when leaving the car"). Returns where the character now is.
+local PASSENGER_EXITS = { { -48, 167 }, { -48, 250 }, { -150, 167 }, { 60, 220 }, { -250, 0 } }   -- forward, right
+local function placeOutsidePassengerDoor(ch, car)
+    local l, f, r = car:K2_GetActorLocation(), car:GetActorForwardVector(), car:GetActorRightVector()
+    local rot = ch:K2_GetActorRotation()
+    for _, p in ipairs(PASSENGER_EXITS) do
+        local spot = { X = l.X + f.X * p[1] + r.X * p[2], Y = l.Y + f.Y * p[1] + r.Y * p[2], Z = l.Z + 25 }
+        local ok, done = pcall(function() return ch:K2_TeleportTo(spot, rot) end)
+        if ok and done then return ch:K2_GetActorLocation() end
+    end
+    log("SEAT no free spot next to the car for %s: left where it is", objName(ch))
+    return ch:K2_GetActorLocation()
+end
+
 local function unseatPassenger(pc, car)
     local ch = pc.Pawn
     if not valid(ch) or className(ch) ~= CHARACTER_CLASS then return end
     ch:K2_DetachFromActor(EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld)
-    local l = car:K2_GetActorLocation()
-    local r = car:GetActorRightVector()
-    ch:K2_SetActorLocation({ X = l.X + r.X * 320, Y = l.Y + r.Y * 320, Z = l.Z + 80 }, false, {}, true)
     standOnFeet(ch)
+    placeOutsidePassengerDoor(ch, car)
     -- player 2 moves its own character there too: it stayed inside the car on its own machine (exp174, playtest:
     -- "hard to get out of the car")
     pcall(function()
@@ -741,7 +768,8 @@ Chan.setCommandHandler(function(pc, cmd, seq)
     elseif kind == "PICKUP" or kind == "DROP" then Items.hostCommand(kind, args, pc)
     elseif kind == "PINGBACK" then Chan.hostPingBack(args)
     elseif not CarSync.hostCommand(kind, args, pc) and not Downed.hostCommand(kind, args, pc)
-        and not WorldDoors.hostCommand(kind, args) and not WorldLoot.hostCommand(kind, args) then
+        and not WorldDoors.hostCommand(kind, args) and not WorldLoot.hostCommand(kind, args)
+        and not CarDoors.hostCommand(kind, args) then
         log("CMD unknown %s", tostring(kind))
     end
 end)
@@ -812,12 +840,6 @@ local function undoUnwantedSeats()
                 -- had already pulled player 2 onto the seat on its own machine, so its old spot is gone, and a
                 -- character standing inside the car's body with collision on pushes the car (exp170)
                 unwanted = attached and isCar(par) and not seated[key]
-                if unwanted then
-                    pcall(function()
-                        local l, r = par:K2_GetActorLocation(), par:GetActorRightVector()
-                        back = { X = l.X + r.X * 320, Y = l.Y + r.Y * 320, Z = l.Z + 80 }
-                    end)
-                end
             else
                 -- the host's character: attached here although the host's replicated attachment says it is not
                 local okR, repPar = pcall(function() return ch.AttachmentReplication.AttachParent end)
@@ -853,8 +875,13 @@ local function undoUnwantedSeats()
                     pcall(function() ch[tl]:Stop() end)
                 end
                 pcall(function() ch:K2_DetachFromActor(EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld) end)
-                if back then pcall(function() ch:K2_SetActorLocation(back, false, {}, true) end) end
                 standOnFeet(ch)
+                if ROLE == "host" then
+                    local okB, at = pcall(placeOutsidePassengerDoor, ch, par)
+                    if okB then back = { X = at.X, Y = at.Y, Z = at.Z } end
+                elseif back then
+                    pcall(function() ch:K2_SetActorLocation(back, false, {}, true) end)
+                end
                 -- player 2 moves its own character (a teleport here is overridden by its own movement, exp171)
                 if ROLE == "host" and back then
                     pcall(function()
@@ -1478,6 +1505,7 @@ local function resetPerMapState(newWorld)
     pcall(Downed.mapChanged, newWorld)
     pcall(WorldRep.reset)
     pcall(WorldDoors.reset)
+    pcall(CarDoors.reset)
     pcall(WorldLoot.reset)
     pcall(BodyAnim.reset)
     pcall(Items.reset)
@@ -1827,6 +1855,11 @@ LoopInGameThreadWithDelay(200, function()
                 okW, errW = pcall(ROLE == "host" and WorldLoot.hostTick or WorldLoot.clientTick)
             end
             if not okW then log("loot error: %s", tostring(errW)) end
+            -- car doors: hooks, a new player's door states, the 5 s angle check (host every second)
+            if (ROLE == "host" and fastTick % 5 == 3) or (ROLE == "client" and fastTick % 25 == 3) then
+                okW, errW = pcall(ROLE == "host" and CarDoors.hostTick or CarDoors.clientTick)
+                if not okW then log("cardoors error: %s", tostring(errW)) end
+            end
         end
     end
     if ROLE == "host" then

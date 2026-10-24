@@ -20,6 +20,9 @@ Start-Sleep 3
 Dev "client2" $E | Out-Null
 $r = WaitFor "client2" "lua return name(me():GetAttachParentActor())" "^nil" 15
 $checks["E while riding gets player 2 out ($r)"] = $r -match "^nil"
+# the host's PLACE (where player 2 stands outside) arrives a moment after the detach: measure from there, or the
+# teleport itself counted as walking (exp184 passed while player 2 could not walk, exp191)
+Start-Sleep 3
 $w0 = Dev "client2" "lua return loc(pawn())"
 Dev "client2" "lua local p=pawn() _G.W=LoopInGameThreadWithDelay(50, function() p:AddMovementInput({X=1,Y=0,Z=0},1.0,true) end) return 'walk'" | Out-Null
 Start-Sleep 3

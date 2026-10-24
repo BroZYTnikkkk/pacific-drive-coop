@@ -8,12 +8,13 @@
 -- explosion never hurt player 2 (exp152). The host now sends "BOOM|x,y,z" when a mine starts exploding; player 2's
 -- game spawns its own mine there and explodes it: its own effects and its own damage to player 2.
 --
--- Car crashes: the car's damage controller (BP_CarDispatchController) gives every hit on the car to
--- EvaluateCarDamageForPlayer, which works out the player's share (LimitDamageToPlayerOverTime) and sends it to "the
--- player" - on the host that is always the host, so player 2 riding along took nothing (owner's playtest
--- 2026-10-24). While player 2 rides, the host sends each of these events as "CRASH|<message class>|<damage>" and
--- player 2's game runs the same function on its copy of the car: its own rules decide the damage to player 2
--- (in the car, the garage, the limits).
+-- Car crashes: the car's damage controller (BP_CarDispatchController) works out the player's share of every hit on
+-- the car (in the car, not in the garage, limited over time) and hands it to "the player" as damage messages
+-- (MSG_Damage_Physical_Impact, 0.04-0.5 each, ~20 per crash; exp215 in a zone) - on the host that is always the
+-- host, so player 2 riding along took nothing (owner's playtest 2026-10-24). While player 2 rides, each message the
+-- host's player receives from the car goes to player 2 as "CRASH|<message class>|<damage>", and player 2's game
+-- hands the same message to its player (its own resistances apply). Player 2's copy of the car cannot work it out
+-- itself: its controller's evaluation stops at once on a replicated car (exp215).
 return function(ctx)
     local log, valid, UEHelpers = ctx.log, ctx.valid, ctx.UEHelpers
     local M = {}
@@ -28,7 +29,7 @@ return function(ctx)
         return valid(c) and c or nil
     end
 
-    local DISPATCH = "/Game/Systems/Messages/BP_CarDispatchController.BP_CarDispatchController_C"
+    local RECEIVER = "/Game/Characters/Player/Components/AC_PlayerHealthReceiverHelper.AC_PlayerHealthReceiverHelper_C"
     local MSG_DIR = "/Game/Systems/Messages/"
     local function shortClass(path)
         local n = path:match("^" .. MSG_DIR:gsub("%p", "%%%0") .. "([%w_]+)%.%1_C$")
@@ -39,15 +40,18 @@ return function(ctx)
         return MSG_DIR .. short .. "." .. short .. "_C"
     end
     local function hookCrashes()
-        if not valid(StaticFindObject(DISPATCH)) then return end
-        ctx.Events.hookFunction(DISPATCH .. ":EvaluateCarDamageForPlayer", function(selfp, msgp)
+        if not valid(StaticFindObject(RECEIVER)) then return end
+        ctx.Events.hookFunction(RECEIVER .. ":MessageBind_MSG_Base_Damage_C", function(selfp, msgp, srcp)
             if not ctx.passengerRiding() then return end
             local okM, cls, dmg = pcall(function()
+                local src = srcp:get()
+                if not src:GetClass():GetFName():ToString():find("CarDispatchController", 1, true) then return nil end
+                if not ctx.isMine(selfp:get():GetOwner()) then return nil end
                 local m = msgp:get()
                 return m:GetClass():GetFullName():match("%s(%S+)$"), m.Damage
             end)
             if okM and cls and type(dmg) == "number" and dmg > 0 then
-                ctx.hostSend(string.format("CRASH|%s|%.2f", shortClass(cls), dmg))
+                ctx.hostSend(string.format("CRASH|%s|%.3f", shortClass(cls), dmg))
             end
         end)
     end
@@ -118,7 +122,8 @@ return function(ctx)
         end
     end
 
-    -- player 2: the host's car took a hit while player 2 rides: the same evaluation on player 2's copy of the car
+    -- player 2: its share of a crash of the host's car, handed to player 2's player as the same message from player
+    -- 2's copy of the car's damage controller
     local crashLogged = 0
     ctx.hostMsgHandlers["CRASH"] = function(rest)
         if not ctx.enabled() then return end
@@ -126,15 +131,17 @@ return function(ctx)
         if not short then return end
         local cls = StaticFindObject(classPath(short))
         local car = ctx.playerCar()
-        if not (valid(cls) and valid(car)) then return end
+        local pawn = nil
+        pcall(function() pawn = ctx.localController().Pawn end)
+        if not (valid(cls) and valid(car) and valid(pawn)) then return end
         local ok, err = pcall(function()
             local msg = StaticConstructObject(cls, FindFirstOf("InventorySystem"))
             msg.Damage = tonumber(dmg)
-            car.DamageDispatchController:EvaluateCarDamageForPlayer(msg)
+            pawn.AC_PlayerHealthReceiverHelper:MessageBind_MSG_Base_Damage_C(msg, car.DamageDispatchController, pawn)
         end)
         if crashLogged < 5 or not ok then
             crashLogged = crashLogged + 1
-            log("HAZARD car hit on the host (%s %s): evaluated for player 2 here ok=%s %s", short, dmg, tostring(ok), ok and "" or tostring(err))
+            log("HAZARD crash of the host's car: %s damage to player 2 (%s) ok=%s %s", dmg, short, tostring(ok), ok and "" or tostring(err))
         end
     end
 

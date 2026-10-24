@@ -671,6 +671,7 @@ local Hazards = require("hazards")({
     log = log, valid = valid, UEHelpers = UEHelpers, Events = Events,
     playerCar = function() return playerCar() end,
     passengerRiding = function() return next(seated) ~= nil end,
+    isMine = function(ch) return isMyCharacter(ch) end,
     localController = function() return localController() end,
     enabled = function() return feature("hazards") end,
     hostSend = function(payload) hostSend(payload) end,

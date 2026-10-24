@@ -1089,6 +1089,77 @@ local clientSeated = false
 local rideTicks = 0
 local unseatSent = false
 local rideLoop = nil       -- per-frame loop that keeps the client's kinematic car on the replicated transform
+-- Player 2's kinematic copy of the car follows the host's car smoothly. The host's updates arrive 40-190 ms apart
+-- (exp202, 20 a second but irregular); put on each one as it came, the car stood still between them and jumped
+-- (owner's playtest: "the car is jerky in motion"). Every frame the car moves on by the replicated velocity, then
+-- closes part of the gap to where the host's car should be now (the last update carried on by its velocity for the
+-- time since it arrived), so it speeds up or slows down a little instead of jumping. A gap over 5 m (a reset, a
+-- teleport) is taken at once. Rotation the same way, yaw carried on by the angular velocity (degrees per second).
+local CAR_CATCHUP = 0.15       -- seconds to close most of the gap
+local carSmooth = nil
+local function angleDelta(a, b)
+    local d = (b - a) % 360
+    if d > 180 then d = d - 360 end
+    return d
+end
+local function smoothCarFrame(car)
+    local now = os.clock()
+    local rm = car.ReplicatedMovement
+    local l, r, v, w = rm.Location, rm.Rotation, rm.LinearVelocity, rm.AngularVelocity
+    local S = carSmooth
+    if not S or S.car ~= car:GetFullName() then
+        S = { car = car:GetFullName() }
+        carSmooth = S
+    end
+    if S.lx ~= l.X or S.ly ~= l.Y or S.lz ~= l.Z or S.yaw ~= r.Yaw or S.pitch ~= r.Pitch or S.roll ~= r.Roll then
+        S.lx, S.ly, S.lz, S.pitch, S.yaw, S.roll = l.X, l.Y, l.Z, r.Pitch, r.Yaw, r.Roll
+        S.vx, S.vy, S.vz, S.wz, S.at = v.X, v.Y, v.Z, w.Z, now
+    end
+    local age = math.min(now - S.at, 0.25)
+    local tx, ty, tz = S.lx + S.vx * age, S.ly + S.vy * age, S.lz + S.vz * age
+    local tyaw = S.yaw + math.max(-45, math.min(45, S.wz * age))
+    local fdt = S.last and math.min(now - S.last, 0.1) or 0
+    S.last = now
+    local gap = S.cx and math.sqrt((tx - S.cx) ^ 2 + (ty - S.cy) ^ 2 + (tz - S.cz) ^ 2) or math.huge
+    if gap > 500 then
+        S.cx, S.cy, S.cz, S.cp, S.cyaw, S.cr = tx, ty, tz, S.pitch, tyaw, S.roll
+    else
+        local k = 1 - math.exp(-fdt / CAR_CATCHUP)
+        S.cx = S.cx + S.vx * fdt; S.cy = S.cy + S.vy * fdt; S.cz = S.cz + S.vz * fdt
+        S.cx = S.cx + (tx - S.cx) * k; S.cy = S.cy + (ty - S.cy) * k; S.cz = S.cz + (tz - S.cz) * k
+        S.cyaw = S.cyaw + S.wz * fdt
+        S.cyaw = S.cyaw + angleDelta(S.cyaw, tyaw) * k
+        S.cp = S.cp + angleDelta(S.cp, S.pitch) * k
+        S.cr = S.cr + angleDelta(S.cr, S.roll) * k
+    end
+    car:K2_SetActorLocationAndRotation({ X = S.cx, Y = S.cy, Z = S.cz }, { Pitch = S.cp, Yaw = S.cyaw, Roll = S.cr },
+        false, {}, true)
+end
+-- Player 2's copy of the host's car, from the moment it is there (not only after the first ride): kinematic, its
+-- vehicle simulation off, moved by smoothCarFrame every frame. Left to its own physics with the engine's corrections
+-- it was jerky too while player 2 watched from outside (exp204: speed jumping 42% from frame to frame, 8% in the
+-- follow mode). The host stays the only simulation of the car.
+local carFollowFor = ""
+local function ensureCarFollow()
+    local car = playerCar()
+    if not valid(car) then return end
+    local name = car:GetFullName()
+    if carFollowFor ~= name then
+        local okK = pcall(function() car.Chassis:SetSimulatePhysics(false) end)
+        local okV = pcall(function() car.VehicleController:SetComponentTickEnabled(false) end)
+        carFollowFor = name
+        log("CARFOLLOW %s follows the host's car: kinematic=%s vehicleTickOff=%s", objName(car), tostring(okK), tostring(okV))
+    end
+    -- one loop for the whole map: a loop per ride made several of them fight over the car. 16 ms, not every frame:
+    -- a 1 ms loop starved the other game on the same PC (exp207: the host froze 8-17 s again and again)
+    if not rideLoop then
+        rideLoop = LoopInGameThreadWithDelay(16, function()
+            local c = playerCar()
+            if valid(c) then pcall(smoothCarFrame, c) end
+        end)
+    end
+end
+
 local function clientCarTick()
     local pc = localController()
     if not valid(pc) or not valid(pc.Pawn) or className(pc.Pawn) ~= CHARACTER_CLASS then return end
@@ -1096,24 +1167,15 @@ local function clientCarTick()
     local car = playerCar()
     local parent = ch:GetAttachParentActor()
     if valid(parent) and not clientSeated then
-        -- Riding. The server attached us; on the client (1) stop our own movement component so it neither
-        -- predicts nor gets corrected, and (2) make the replicated car kinematic so the client does not
-        -- run its own physics against replication. The seat offset itself comes from the server's replicated
-        -- attachment; re-seating locally computed the offset from a bad car transform read during the
-        -- kinematic switch (exp17: passenger rode along at a constant 16506 uu from the car).
+        -- Riding. The server attached us; on the client stop our own movement component so it neither predicts
+        -- nor gets corrected (the car follows the host's: ensureCarFollow). The seat offset itself comes from the
+        -- server's replicated attachment; re-seating locally computed the offset from a bad car transform read
+        -- during the kinematic switch (exp17: passenger rode along at a constant 16506 uu from the car).
         clientSeated = true
         pcall(function() ch.CharacterMovement:DisableMovement() end)
         pcall(function() ch.CharacterMovement:SetComponentTickEnabled(false) end)
         pcall(function() ch:SetActorEnableCollision(false) end)
-        local okK = pcall(function() parent.Chassis:SetSimulatePhysics(false) end)
-        local okV = pcall(function() parent.VehicleController:SetComponentTickEnabled(false) end)
-        -- put the now kinematic car on the replicated transform in this same frame (exp19: one sample with the
-        -- car at a bogus position right after the switch)
-        pcall(function()
-            local rm = parent.ReplicatedMovement
-            parent:K2_SetActorLocationAndRotation({ X = rm.Location.X, Y = rm.Location.Y, Z = rm.Location.Z },
-                { Pitch = rm.Rotation.Pitch, Yaw = rm.Rotation.Yaw, Roll = rm.Rotation.Roll }, false, {}, true)
-        end)
+        pcall(ensureCarFollow)
         -- and put ourselves at the server's attach offset in this frame too (exp21: one sample with the
         -- passenger at a bogus position right when the attachment arrived)
         local okA = pcall(function()
@@ -1121,18 +1183,7 @@ local function clientCarTick()
             ch:K2_SetActorRelativeLocation({ X = ar.LocationOffset.X, Y = ar.LocationOffset.Y, Z = ar.LocationOffset.Z }, false, {}, true)
             ch:K2_SetActorRelativeRotation({ Pitch = ar.RotationOffset.Pitch, Yaw = ar.RotationOffset.Yaw, Roll = ar.RotationOffset.Roll }, false, {}, true)
         end)
-        log("RIDE riding: carKinematic=%s vehicleTickOff=%s attachOffsetApplied=%s parent=%s", tostring(okK), tostring(okV), tostring(okA), objName(parent))
-        -- A kinematic body ignores physics replication, so drive its transform from the replicated
-        -- movement struct every frame (the host stays the only simulation of the car).
-        rideLoop = LoopInGameThreadWithDelay(16, function()
-            local car = playerCar()
-            if not valid(car) then return end
-            pcall(function()
-                local rm = car.ReplicatedMovement
-                car:K2_SetActorLocationAndRotation({ X = rm.Location.X, Y = rm.Location.Y, Z = rm.Location.Z },
-                    { Pitch = rm.Rotation.Pitch, Yaw = rm.Rotation.Yaw, Roll = rm.Rotation.Roll }, false, {}, true)
-            end)
-        end)
+        log("RIDE riding: attachOffsetApplied=%s parent=%s", tostring(okA), objName(parent))
     elseif not valid(parent) and clientSeated then
         -- the host detached us (UNSEAT): walk again
         clientSeated = false
@@ -1504,6 +1555,7 @@ local function resetPerMapState(newWorld)
     reportedDupes, walking, seatRequested, clientSeated, charTicks, rideTicks = false, false, false, false, 0, 0
     drive.phase, drive.t, drive.mode, drive.startLoc, drive.lastLoc, drive.frames = "wait", 0, "throttle", nil, nil, 0
     if rideLoop then pcall(CancelDelayedAction, rideLoop); rideLoop = nil end
+    carSmooth, carFollowFor = nil, ""
     gmLogged = false
     mapTicks = 0
     pcall(Downed.mapChanged, newWorld)
@@ -1831,6 +1883,8 @@ LoopInGameThreadWithDelay(200, function()
         if ROLE == "client" then
             okB, errB = pcall(placeTick)
             if not okB then log("place error: %s", tostring(errB)) end
+            okB, errB = pcall(ensureCarFollow)
+            if not okB then log("carfollow error: %s", tostring(errB)) end
         end
         okB, errB = pcall(bodyAnimTick)
         if not okB then log("bodyanim error: %s", tostring(errB)) end

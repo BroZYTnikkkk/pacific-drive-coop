@@ -36,7 +36,7 @@ local ROLE, ARG, SCENARIO = readRole()
 -- the host, player 2's E on a door runs on the host), loot (lootable containers hold the host's items).
 local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true,
                    worldrep = true, doors = true, loot = true, bodyanim = true, bodycolor = true, hazards = true,
-                   cardoors = true }
+                   cardoors = true, cutscene = true }
 do
     local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
     if f then
@@ -671,7 +671,6 @@ local Hazards = require("hazards")({
     log = log, valid = valid, UEHelpers = UEHelpers, Events = Events,
     playerCar = function() return playerCar() end,
     passengerRiding = function() return next(seated) ~= nil end,
-    isMine = function(ch) return isMyCharacter(ch) end,
     localController = function() return localController() end,
     enabled = function() return feature("hazards") end,
     hostSend = function(payload) hostSend(payload) end,
@@ -695,6 +694,16 @@ local CarDoors = require("cardoors")({
     enabled = function() return feature("cardoors") end,
     role = function() return ROLE end,
     playerCar = function() return playerCar() end,
+    sendCommand = function(cmd) sendCommand(cmd) end,
+    hostSend = function(payload) hostSend(payload) end,
+    hostMsgHandlers = hostMsgHandlers,
+})
+
+-- the new-game opening skipped with E for both players (cutscene.lua)
+local Cutscene = require("cutscene")({
+    log = log, valid = valid,
+    enabled = function() return feature("cutscene") end,
+    role = function() return ROLE end,
     sendCommand = function(cmd) sendCommand(cmd) end,
     hostSend = function(payload) hostSend(payload) end,
     hostMsgHandlers = hostMsgHandlers,
@@ -800,7 +809,7 @@ Chan.setCommandHandler(function(pc, cmd, seq)
     elseif kind == "PINGBACK" then Chan.hostPingBack(args)
     elseif not CarSync.hostCommand(kind, args, pc) and not Downed.hostCommand(kind, args, pc)
         and not WorldDoors.hostCommand(kind, args) and not WorldLoot.hostCommand(kind, args)
-        and not CarDoors.hostCommand(kind, args) then
+        and not CarDoors.hostCommand(kind, args) and not Cutscene.hostCommand(kind) then
         log("CMD unknown %s", tostring(kind))
     end
 end)
@@ -1913,7 +1922,10 @@ end
 if ROLE == "host" or ROLE == "client" then RegisterKeyBind(Key.F9, onGameThread(toggleWatch)) end
 -- E also counts for the revive (a fallback if the game does not report it as held); only a timestamp here,
 -- the key hook runs outside the game thread
-RegisterKeyBind(Key.E, function() Downed.keyPressed() end)
+RegisterKeyBind(Key.E, function()
+    Downed.keyPressed()
+    ExecuteInGameThread(function() pcall(Cutscene.keyPressed) end)
+end)
 
 LoopInGameThreadWithDelay(200, function()
     fastTick = fastTick + 1
@@ -2064,6 +2076,11 @@ LoopInGameThreadWithDelay(5000, function()
         if gameplay and SCENARIO == "lootprobe" then
             mapTicks = mapTicks + 1
             if mapTicks == 8 then step("lootdump", function() dumpLoot(worldName) end) end
+        end
+        -- gametravel bot: player 2 presses E during the new-game opening (skips it for both through the host)
+        if gameplay and SCENARIO == "gametravel" and ROLE == "client" then
+            mapTicks = mapTicks + 1
+            if mapTicks == 3 then step("skipcut", Cutscene.keyPressed) end
         end
         if ROLE == "client" and gameplay then
             step("dedupe", dedupeCar)

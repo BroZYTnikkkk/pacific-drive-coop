@@ -12,3 +12,4 @@ loot = on        ; crates, backpacks, cabinets hold the host's items; what one p
 bodyanim = on   ; the other player's body walks, runs, crouches, jumps, lies when down, sits in the car
 hazards = on    ; a landmine exploding on the host explodes for player 2 too: player 2's game shows it and computes the damage
 cardoors = on   ; the car's doors and trunk lid open and shut for both players at the same moment
+cutscene = on   ; the new-game opening is skipped with E, for both players at once

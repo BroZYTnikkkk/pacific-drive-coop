@@ -139,6 +139,9 @@ if ($Scenario -in @("gametravel", "lootprobe")) {
     $newMap = (Select-String -Path $hostLog -Pattern "GAMETRAVEL host arrived in (\S+)" | Select-Object -First 1 | ForEach-Object { $_.Matches[0].Groups[1].Value })
     $checks["game's own UserNewGame travelled the host to a gameplay map ($newMap)"] = [bool]$newMap
     $checks["host re-hosted that map with ?listen"] = [bool](Select-String -Path $hostLog -Pattern "REHOST game travelled to" -Quiet)
+    # the new-game opening: player 2's bot presses E, the opening is skipped on both machines
+    $checks["player 2's E skipped the opening on its machine"] = [bool](Select-String -Path $clientLog -Pattern "CUTSCENE opening skipped here \(E\) ok=true" -Quiet)
+    $checks["the host skipped it too (player 2's skip)"] = [bool](Select-String -Path $hostLog -Pattern "CUTSCENE opening skipped here \(player 2's E\) ok=true" -Quiet)
     $after = @()
     if ($newMap) { $after = @(Select-String -Path $clientLog -Pattern "PDNET\|client\|.*map=$newMap\|.*serverConn=yes" | ForEach-Object { $_.Line }) }
     $checks["client rejoined the host in the new map"] = $after.Count -gt 0

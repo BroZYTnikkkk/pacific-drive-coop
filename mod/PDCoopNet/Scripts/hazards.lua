@@ -9,12 +9,14 @@
 -- game spawns its own mine there and explodes it: its own effects and its own damage to player 2.
 --
 -- Car crashes: the car's damage controller (BP_CarDispatchController) works out the player's share of every hit on
--- the car (in the car, not in the garage, limited over time) and hands it to "the player" as damage messages
+-- the car (LimitDamageToPlayerOverTime: limited over time) and hands it to "the player" as damage messages
 -- (MSG_Damage_Physical_Impact, 0.04-0.5 each, ~20 per crash; exp215 in a zone) - on the host that is always the
--- host, so player 2 riding along took nothing (owner's playtest 2026-10-24). While player 2 rides, each message the
--- host's player receives from the car goes to player 2 as "CRASH|<message class>|<damage>", and player 2's game
--- hands the same message to its player (its own resistances apply). Player 2's copy of the car cannot work it out
--- itself: its controller's evaluation stops at once on a replicated car (exp215).
+-- host, so player 2 riding along took nothing (owner's playtest 2026-10-24). While player 2 rides, each share the
+-- host's controller works out goes to player 2 as "CRASH|<message class>|<damage>" (not in the garage, where the
+-- game deals no player damage), and player 2's game hands it to its player as the same message (its own
+-- resistances apply). Player 2's copy of the car cannot work it out itself: its controller's evaluation stops at
+-- once on a replicated car (exp215). Hooking the player's damage receiver instead crashed the game inside UE4SS
+-- right after the hook went in (exp226/227, also on a map change).
 return function(ctx)
     local log, valid, UEHelpers = ctx.log, ctx.valid, ctx.UEHelpers
     local M = {}
@@ -29,7 +31,7 @@ return function(ctx)
         return valid(c) and c or nil
     end
 
-    local RECEIVER = "/Game/Characters/Player/Components/AC_PlayerHealthReceiverHelper.AC_PlayerHealthReceiverHelper_C"
+    local DISPATCH = "/Game/Systems/Messages/BP_CarDispatchController.BP_CarDispatchController_C"
     local MSG_DIR = "/Game/Systems/Messages/"
     local function shortClass(path)
         local n = path:match("^" .. MSG_DIR:gsub("%p", "%%%0") .. "([%w_]+)%.%1_C$")
@@ -39,16 +41,16 @@ return function(ctx)
         if short:sub(1, 1) == "/" then return short end
         return MSG_DIR .. short .. "." .. short .. "_C"
     end
+    local function inGarage()
+        local ok, g = pcall(function() return FindFirstOf("DrivingGameInstance"):IsInGarage() end)
+        return ok and g == true
+    end
     local function hookCrashes()
-        if not valid(StaticFindObject(RECEIVER)) then return end
-        ctx.Events.hookFunction(RECEIVER .. ":MessageBind_MSG_Base_Damage_C", function(selfp, msgp, srcp)
-            if not ctx.passengerRiding() then return end
+        if not valid(StaticFindObject(DISPATCH)) then return end
+        ctx.Events.hookFunction(DISPATCH .. ":LimitDamageToPlayerOverTime", function(selfp, msgp, incomingp, updatedp)
+            if not ctx.passengerRiding() or inGarage() then return end
             local okM, cls, dmg = pcall(function()
-                local src = srcp:get()
-                if not src:GetClass():GetFName():ToString():find("CarDispatchController", 1, true) then return nil end
-                if not ctx.isMine(selfp:get():GetOwner()) then return nil end
-                local m = msgp:get()
-                return m:GetClass():GetFullName():match("%s(%S+)$"), m.Damage
+                return msgp:get():GetClass():GetFullName():match("%s(%S+)$"), updatedp:get()
             end)
             if okM and cls and type(dmg) == "number" and dmg > 0 then
                 ctx.hostSend(string.format("CRASH|%s|%.3f", shortClass(cls), dmg))

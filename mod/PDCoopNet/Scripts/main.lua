@@ -1413,6 +1413,7 @@ function nearestEntryPoint(door, from)
     return best
 end
 local enterHookDone = false
+local pendingUnseatAt = nil   -- player 2: os.clock() of an Exit Car whose UNSEAT is about to be sent
 local function registerEnterCarHook()
     if enterHookDone or ROLE ~= "client" then return end
     local any = FindFirstOf(CHARACTER_CLASS)
@@ -1420,10 +1421,21 @@ local function registerEnterCarHook()
     enterHookDone = true
     local cls = any:GetClass():GetFullName():match("%s(%S+)$")
     local ok, err = pcall(function()
-        RegisterHook(cls .. ":CommandEnterCar", function(ctx)
+        RegisterHook(cls .. ":CommandEnterCar", function(ctx, teleportp, doorp)
             local ch = ctx:get()
             if not valid(ch) or not isMyCharacter(ch) then return end
             if clientSeated then
+                -- E goes through a door part: CommandEnterCar(false, door, ...). The game's own seating calls it with
+                -- (true, none) - the new-game opening does that again when it ends or is skipped, and player 2 got out
+                -- of the car right then and stood outside for the whole intro (exp267). That one is not E: stay.
+                local tele, door = false, nil
+                pcall(function() tele = teleportp:get() end)
+                pcall(function() door = doorp:get() end)
+                if tele == true and not valid(door) then
+                    if pendingUnseatAt then pendingUnseatAt = nil; log("ENTERCAR the game's own exit and seating at once (cutscene): no UNSEAT") end
+                    log("ENTERCAR the game seats player 2 again while it rides (cutscene): stays")
+                    return
+                end
                 -- E while riding: the game starts another entry; out through the passenger door instead
                 if not (hostAllowsExit and exitAllowedHere()) then
                     log("ENTERCAR E while riding: getting out is not allowed now (cutscene)")
@@ -1448,8 +1460,16 @@ local function registerEnterCarHook()
         RegisterHook(cls .. ":Exit Car", function(ctx)
             local ch = ctx:get()
             if not valid(ch) or not isMyCharacter(ch) or not clientSeated then return end
-            sendCommand("UNSEAT")
-            log("ENTERCAR getting out: UNSEAT sent")
+            -- the game's own exit right before its own seating (the opening ended or skipped: Exit Car, then
+            -- CommandEnterCar(true, none) at once, exp269) is no getting out: UNSEAT waits a moment for that
+            local at = os.clock()
+            pendingUnseatAt = at
+            ExecuteInGameThreadWithDelay(400, function()
+                if pendingUnseatAt ~= at then return end
+                pendingUnseatAt = nil
+                sendCommand("UNSEAT")
+                log("ENTERCAR getting out: UNSEAT sent")
+            end)
         end)
         RegisterHook(DOOR_CLASS .. ":" .. DOOR_ENTER_EVENT, function(selfp)
             local d = selfp:get()
@@ -1559,6 +1579,24 @@ local function dedupeCar()
     if valid(carm) and not (valid(carm.NewCarActor) and carm.NewCarActor:GetFullName() == replicated:GetFullName()) then
         carm.NewCarActor = replicated
         log("client CarManager now points at %s", objName(replicated))
+    end
+end
+
+-- Riding player 2 looks through its own eyes. The new-game opening sets the view to the car itself (the driver's
+-- camera: player 2 "sat at the wheel", exp269 view target BP_PlayerCar_Intro_C at the driver's seat); a cutscene's
+-- own camera is left alone.
+local viewFixLogged = false
+local function passengerViewTick()
+    if not clientSeated then return end
+    local pc = localController()
+    if not valid(pc) or not valid(pc.Pawn) then return end
+    local okV, vt = pcall(function() return pc:GetViewTarget() end)
+    if okV and valid(vt) and isCar(vt) then
+        pcall(function() pc:SetViewTargetWithBlend(pc.Pawn, 0.3, 0, 0, false) end)
+        if not viewFixLogged then
+            viewFixLogged = true
+            log("RIDE the view was the car (%s): back to player 2's own eyes", objName(vt))
+        end
     end
 end
 
@@ -2096,6 +2134,12 @@ LoopInGameThreadWithDelay(200, function()
         if ROLE == "client" then
             okB, errB = pcall(placeTick)
             if not okB then log("place error: %s", tostring(errB)) end
+            -- player 2's own copy of a car the host replicates goes at once: the new-game opening seats player 2 at
+            -- the wheel of its own intro car until then (owner: "what is with the display on the client")
+            okB, errB = pcall(dedupeCar)
+            if not okB then log("dedupe error: %s", tostring(errB)) end
+            okB, errB = pcall(passengerViewTick)
+            if not okB then log("view error: %s", tostring(errB)) end
             okB, errB = pcall(ensureCarFollow)
             if not okB then log("carfollow error: %s", tostring(errB)) end
         end

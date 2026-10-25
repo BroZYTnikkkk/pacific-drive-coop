@@ -9,6 +9,8 @@ param(
 . "$PSScriptRoot\testlib.ps1"
 StartPair
 $E = "lua local me=me() local cls=me:GetClass():GetFullName():match('%s(%S+)$') StaticFindObject(cls..':CommandEnterCar')(me, true, nil, false) return 'E'"
+# E while riding, as the game makes it: through the door part (the game's own seating, (true, none), is no E)
+$EDOOR = "lua local me=me() local car=me:GetAttachParentActor() local door=nil for _, d in ipairs(FindAllOf('BP_CarPart_Door_Base_C')) do local p=d:GetAttachParentActor() if p and p:IsValid() and p:GetFullName()==car:GetFullName() then local l, c = d:K2_GetActorLocation(), car:K2_GetActorLocation() local f, r = car:GetActorForwardVector(), car:GetActorRightVector() if (l.X-c.X)*f.X+(l.Y-c.Y)*f.Y > 70 and (l.X-c.X)*r.X+(l.Y-c.Y)*r.Y > 40 then door=d end end end local cls=me:GetClass():GetFullName():match('%s(%S+)$') StaticFindObject(cls..':CommandEnterCar')(me, false, door, false) return 'E door'"
 $MENU = "lua local a={} im():IsPlayerMenuOpen(a,{}) return fmt(a.IsOpen)"
 
 # E at the car -> passenger with a free camera; E again -> out
@@ -18,9 +20,14 @@ $r = WaitFor "client2" "lua return name(me():GetAttachParentActor()), fmt(pc():I
 $checks["E at the car seats player 2 as passenger, camera free ($r)"] = $r -match "BP_PlayerCar\w+\s+false"
 Start-Sleep 3
 # the host watches player 2's visible body getting out: it moves from the seat to the door, no jump, the car stays
-$watch = "lua local car for _, c in ipairs(FindAllOf('BP_PlayerCarNew_C')) do if c:IsValid() then car = c end end local p2 for _, ch in ipairs(FindAllOf('PDP_MainCharacter_C')) do if ch:IsValid() and ch.Controller:IsValid() and not ch.Controller:IsLocalController() then p2 = ch end end local c0, last, mx, t0 = car:K2_GetActorLocation(), nil, 0, os.clock() if SWL then CancelDelayedAction(SWL) end SWL = LoopInGameThreadWithDelay(16, function() if os.clock() - t0 > 8 then return end local l, c = p2.Mesh:K2_GetComponentLocation(), car:K2_GetActorLocation() local p = { l.X - c.X, l.Y - c.Y, l.Z - c.Z } if last then mx = math.max(mx, math.sqrt((p[1]-last[1])^2 + (p[2]-last[2])^2 + (p[3]-last[3])^2)) end last = p end) SWR = function() local c = car:K2_GetActorLocation() return string.format('maxStep=%.0f carMoved=%.0f', mx, math.sqrt((c.X-c0.X)^2 + (c.Y-c0.Y)^2)) end return 'watching'"
+$watch = "lua local car for _, c in ipairs(FindAllOf('BP_PlayerCarNew_C')) do if c:IsValid() then car = c end end local p2 for _, ch in ipairs(FindAllOf('PDP_MainCharacter_C')) do if ch:IsValid() and ch.Controller:IsValid() and not ch.Controller:IsLocalController() then p2 = ch end end local c0, last, mx, t0 = car:K2_GetActorLocation(), nil, 0, os.clock() if SWL then CancelDelayedAction(SWL) end SWL = LoopInGameThreadWithDelay(16, function() if os.clock() - t0 > 16 then return end local l, c = p2.Mesh:K2_GetComponentLocation(), car:K2_GetActorLocation() local p = { l.X - c.X, l.Y - c.Y, l.Z - c.Z } if last then mx = math.max(mx, math.sqrt((p[1]-last[1])^2 + (p[2]-last[2])^2 + (p[3]-last[3])^2)) end last = p end) SWR = function() local c = car:K2_GetActorLocation() return string.format('maxStep=%.0f carMoved=%.0f', mx, math.sqrt((c.X-c0.X)^2 + (c.Y-c0.Y)^2)) end return 'watching'"
 Dev "client1" $watch | Out-Null
+# the game's own seating while riding (the opening does that) keeps player 2 in the car
 Dev "client2" $E | Out-Null
+Start-Sleep 2
+$r = Dev "client2" "lua return name(me():GetAttachParentActor())"
+$checks["the game's own seating while riding is no E: player 2 stays in ($r)"] = $r -match "BP_PlayerCar"
+Dev "client2" $EDOOR | Out-Null
 $r = WaitFor "client2" "lua return name(me():GetAttachParentActor())" "^nil" 15
 $checks["E while riding gets player 2 out ($r)"] = $r -match "^nil"
 Start-Sleep 4

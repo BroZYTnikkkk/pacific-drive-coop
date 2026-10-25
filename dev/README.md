@@ -14,6 +14,7 @@ Do not install `PDCoopDev` for normal play: it has cheats and runs Lua sent thro
 | `test_downed.ps1` | down instead of dead, revive both ways (with / without food), team death after 60 s, player 2's losses, tombstone (zone map, `-ResetSave`) |
 | `test_worldrep.ps1` | the host's generated zone content reaches player 2 (zone via `zone_pair.ps1`, compared with `snapdiff.ps1`): coverage, no doubles of the car parts / prefabs |
 | `test_doors.ps1` | zone doors: player 2's doors in the host's state, the host's and player 2's door use reach the other side |
+| `test_pause.ps1` | the pause menu pauses the world for both players, either one can open it; the host survives resuming with player 2 connected |
 | `test_loot.ps1` | lootable containers: player 2 gets the host's items, takes and puts reach the other side |
 | `zone_pair.ps1` | host loads a save slot, drives the route into a real generated zone, re-hosts it, player 2 joins; leaves both running |
 | `snapdiff.ps1` | compares two `snapshot` files class by class: counts, actors without a twin on the other side |

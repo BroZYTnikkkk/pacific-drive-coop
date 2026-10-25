@@ -47,8 +47,8 @@ or the car, in which case they are seated as a passenger). Saved positions and t
   (landmines are there for player 2 on the refactor branch, their explosions for player 2 are not tested; radiation clouds differ) and weather.
 - **Which parts are installed on the car is not synced** (only their health, fuel, battery): a part taken off or
   put on by one player can look different for the other.
-- **Esc on the host is off while a partner is connected**: the host's pause menu crashed the game natively
-  (playtest 2026-10-21, reproduced). Settings and quit-to-menu are reachable when the partner is not connected.
+- **Pause is shared**: either player's pause menu (Esc) pauses the game for both; it stays paused while one of
+  the two menus is open, and the other player sees a note. The logbook does not pause the game in co-op.
 - The trunk is used by one player at a time: while it is open at one player, the other cannot open it.
 - The game's map in the car shows nothing for player 2.
 - World items and the car trunk are shared (host is the truth); **inventories are per player**. Player 2's

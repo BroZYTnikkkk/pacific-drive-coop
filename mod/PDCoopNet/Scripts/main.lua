@@ -36,7 +36,7 @@ local ROLE, ARG, SCENARIO = readRole()
 -- the host, player 2's E on a door runs on the host), loot (lootable containers hold the host's items).
 local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true,
                    worldrep = true, doors = true, loot = true, bodyanim = true, bodycolor = true, hazards = true,
-                   cardoors = true, cutscene = true }
+                   cardoors = true, cutscene = true, pauseblock = false, pausefix = true, pause = true }
 do
     local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
     if f then
@@ -709,6 +709,22 @@ local Cutscene = require("cutscene")({
     hostMsgHandlers = hostMsgHandlers,
 })
 
+-- a real pause, the same for both players (pause.lua); pauseblock (the old block of the host's menu) turns it off
+local Pause = require("pause")({
+    log = log, valid = valid, UEHelpers = UEHelpers, Events = Events,
+    enabled = function() return feature("pause") and not feature("pauseblock") end,
+    role = function() return ROLE end,
+    clientsPresent = function()
+        for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+            if valid(pc) and not pc:IsLocalController() then return true end
+        end
+        return false
+    end,
+    sendCommand = function(cmd) sendCommand(cmd) end,
+    hostSend = function(payload) hostSend(payload) end,
+    hostMsgHandlers = hostMsgHandlers,
+})
+
 -- the host's world items, local copies on the other players' machines (items.lua)
 local Items = require("items")({
     log = log, valid = valid, same = Events.same, UEHelpers = UEHelpers, ItemState = ItemState,
@@ -809,7 +825,8 @@ Chan.setCommandHandler(function(pc, cmd, seq)
     elseif kind == "PINGBACK" then Chan.hostPingBack(args)
     elseif not CarSync.hostCommand(kind, args, pc) and not Downed.hostCommand(kind, args, pc)
         and not WorldDoors.hostCommand(kind, args) and not WorldLoot.hostCommand(kind, args)
-        and not CarDoors.hostCommand(kind, args) and not Cutscene.hostCommand(kind) then
+        and not CarDoors.hostCommand(kind, args) and not Cutscene.hostCommand(kind)
+        and not Pause.hostCommand(kind, args) then
         log("CMD unknown %s", tostring(kind))
     end
 end)
@@ -1690,6 +1707,7 @@ local function resetPerMapState(newWorld)
     pcall(WorldRep.reset)
     pcall(WorldDoors.reset)
     pcall(CarDoors.reset)
+    pcall(Pause.reset)
     pcall(WorldLoot.reset)
     pcall(BodyAnim.reset)
     pcall(Items.reset)
@@ -1723,15 +1741,49 @@ local coopActive = false     -- the host has had remote players in this session
 local hostingEnabled = false -- play: the host pressed F8
 -- rehostedFor is declared above resetPerMapState, which clears it on every arrival
 
+-- Old workaround, kept behind the feature switch "pauseblock" (off by default since the cause is fixed, see
+-- ensureRemotePlayerInput above; pause.lua does the real shared pause).
 -- No world pause while players are connected. The host crashed natively (EXCEPTION_ACCESS_VIOLATION reading 0x178,
 -- no Lua in the stack) when pressing Esc while driving, three times in the playtest of 2026-10-21, and the client
 -- hung. Reproduced 2026-10-22 in a dev session: pausing and then unpausing the world with a client connected
 -- crashes with the same address. So the world is never paused while a client is connected: a pre-hook on the
 -- native SetGamePaused turns "pause" into "no pause" (the pause menu still opens, the world keeps running, as in
 -- other online games).
+-- The cause (dumps 2026-10-21/22, all four the same stack): the pause menu runs the game's latent
+-- PenDriverViewportClient:ClearAllPressedInputs, which calls PlayerTick on EVERY controller of the world. A remote
+-- player's controller on the host has no PlayerInput (the engine makes one only for local players and itself never
+-- ticks remote controllers while paused), so TickPlayerInput reads PlayerInput->0x178 through a null pointer
+-- (exe+3160a56 UPlayerInput::Tick <- exe+2fc4f50 TickPlayerInput <- exe+2fbc4d0 PlayerTick <- exe+10a5b60).
+-- Fix: the host gives each remote controller a PlayerInput of its own. It has no keys and no input stack, so the
+-- game's extra PlayerTick does nothing for it.
+local remoteInputLogged = {}
+local function ensureRemotePlayerInput()
+    if ROLE ~= "host" or not feature("pausefix") then return end
+    local cls
+    for _, pc in ipairs(FindAllOf("PlayerController") or {}) do
+        if valid(pc) and not pc:IsLocalController() then
+            local has = false
+            pcall(function() has = valid(pc.PlayerInput) end)
+            if not has then
+                if not cls then
+                    local localPc = UEHelpers.GetPlayerController()
+                    pcall(function() if valid(localPc.PlayerInput) then cls = localPc.PlayerInput:GetClass() end end)
+                    cls = cls or StaticFindObject("/Script/Engine.PlayerInput")
+                end
+                local ok, err = pcall(function() pc.PlayerInput = StaticConstructObject(cls, pc) end)
+                local name = pc:GetFullName()
+                if not ok or not remoteInputLogged[name] then
+                    remoteInputLogged[name] = true
+                    log("PAUSEFIX PlayerInput for remote controller %s ok=%s %s", name, tostring(ok), ok and "" or tostring(err))
+                end
+            end
+        end
+    end
+end
+
 local pauseHookDone = false
 local function registerPauseHook()
-    if pauseHookDone or ROLE ~= "host" then return end
+    if pauseHookDone or ROLE ~= "host" or not feature("pauseblock") then return end
     pauseHookDone = true
     local path = "/Script/Engine.GameplayStatics:SetGamePaused"
     local ok, err = pcall(function()
@@ -2053,6 +2105,11 @@ LoopInGameThreadWithDelay(200, function()
                 okW, errW = pcall(ROLE == "host" and CarDoors.hostTick or CarDoors.clientTick)
                 if not okW then log("cardoors error: %s", tostring(errW)) end
             end
+            -- pause: hooks, player 2 gone with its menu open, the paused state again now and then
+            if fastTick % 5 == 1 then
+                okW, errW = pcall(ROLE == "host" and Pause.hostTick or Pause.clientTick)
+                if not okW then log("pause error: %s", tostring(errW)) end
+            end
         end
     end
     if ROLE == "host" then
@@ -2114,6 +2171,7 @@ LoopInGameThreadWithDelay(5000, function()
         if ROLE == "host" and gameplay then
             if not gmLogged then gmLogged = true; step("gamemode", logGameModeOnce) end
             step("spawn", spawnForRemotePlayers)
+            step("pausefix", ensureRemotePlayerInput)
             if BOTS and SCENARIO == "rejoincar" then
                 if tick >= 22 and drive.phase == "wait" then step("shot1", function() hostLookAndShoot("walk", "host looks at player 2 walking") end) end
                 if drive.phase == "throttle" and drive.t == 25 then step("shot2", function() hostLookAndShoot("ride", "host looks at the passenger") end) end

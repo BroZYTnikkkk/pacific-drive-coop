@@ -47,12 +47,16 @@ $hm = Dev "client1" $MENU; $cm = Dev "client2" $MENU
 $checks["the host has it open: player 2's trunk does not open (host $hm, player 2 $cm)"] = ($hm -match "true") -and ($cm -match "false")
 Dev "client1" "lua im():RequestPlayerMenuClose() return 'close'" | Out-Null
 
-# Esc on the host with player 2 connected (crashed the host natively before): pause cycles, then Esc 3 times
+# Esc on the host with player 2 connected (crashed the host natively before): pause cycles, Esc 3 times (the
+# first opens the menu; with the menu open Esc goes to the menu itself), then the menu's Resume (crashed there
+# before). The shared pause itself is test_pause.ps1.
 for ($k = 0; $k -lt 3; $k++) { Dev "client1" "lua local u=first('BP_UIManager_C') u:PauseGame(FName('PauseMenu'), true, {}) u:PauseGame(FName('PauseMenu'), false, {}) return 'cycle'" | Out-Null; Start-Sleep 2 }
 for ($k = 0; $k -lt 3; $k++) { Dev "client1" "lua pc():InpActEvt_PauseMenu_K2Node_InputActionEvent_35({KeyName=FName('Escape')}) return 'esc'" | Out-Null; Start-Sleep 5 }
+Dev "client1" "lua local m for _, w in ipairs(FindAllOf('PDP_PauseMenu_C')) do if w:GetFullName():find('Transient') then m = w end end m:BndEvt__PDP_MenuItem_Resume_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature(m.PDP_MenuItem_Resume) return 'resume'" | Out-Null
+Start-Sleep 3
 $st = Dev "client1" "state"
 $checks["Esc on the host while player 2 is connected: the host is still running ($([bool]($st -match 'net: host')))"] = $st -match "net: host\s+players: 2"
-$checks["the host's world was never paused"] = (Dev "client1" "lua return require('UEHelpers').GetGameplayStatics():IsGamePaused(require('UEHelpers').GetWorldContextObject())") -match "false"
+$checks["the host's world runs again after Resume"] = (Dev "client1" "lua return require('UEHelpers').GetGameplayStatics():IsGamePaused(require('UEHelpers').GetWorldContextObject())") -match "false"
 
 # player 2 drops an item at hand height: it lies at its feet on the host and on player 2
 $me = Dev "client2" "lua return me():K2_GetActorLocation().Z"

@@ -114,7 +114,8 @@ Then start the game through Steam as usual.
 |---|---|---|
 | Host | F8 | load your save, then press F8: the current map is re-opened as a listen server |
 | Friend | F8 | connect to the host from the main menu |
-| Friend | E at the passenger door or the car / F6 | sit in the host's car as passenger (always the passenger: the host drives) |
+| Either | E on a car door | open or shut it |
+| Friend | E on the passenger seat (its door open) / F6 | sit in the host's car as passenger (always the passenger: the host drives); the host sits down the same way on the driver's seat |
 | Friend | E in the car (looking at nothing to use) / F7 | get out of the car |
 | Either | Esc | pause menu: the game pauses for both while one of the two menus is open |
 | Either | hold E (5 s) | revive a downed partner next to you |

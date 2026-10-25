@@ -37,7 +37,7 @@ local ROLE, ARG, SCENARIO = readRole()
 local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true,
                    worldrep = true, doors = true, loot = true, bodyanim = true, bodycolor = true, hazards = true,
                    cardoors = true, cutscene = true, pauseblock = false, pausefix = true, pause = true,
-                   seatanim = true, alsloco = true }
+                   seatanim = true, alsloco = true, seats = true }
 do
     local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
     if f then
@@ -1387,8 +1387,6 @@ end
 local DOOR_CLASS = "/Game/Gameplay/Inventory/Items/Car/Doors/BP_CarPart_Door_Base.BP_CarPart_Door_Base_C"
 local PLAYER_CAR_CLASS = "/Game/Characters/PlayerCar/BP_PlayerCarNew.BP_PlayerCarNew_C"
 local DOOR_ENTER_EVENT = "BndEvt__Highlight_K2Node_ComponentBoundEvent_1_OnHighlightInteract__DelegateSignature"
-local DOOR_TOGGLE_EVENTS = { "BndEvt__Highlight_K2Node_ComponentBoundEvent_0_OnHighlightInteract__DelegateSignature",
-    "BndEvt__Highlight_K2Node_ComponentBoundEvent_2_OnHighlightInteract__DelegateSignature" }
 function passengerDoorOf(car)
     if not valid(car) then return nil end
     local carName = car:GetFullName()
@@ -1437,15 +1435,33 @@ end
 -- the game did nothing and player 2 could not get out (real key presses, exp279). An Interact press that
 -- interacted with nothing gets player 2 out; one that used something in the car does not. Hooked again after a
 -- map change (Events.hookFunction from the client loop).
+-- sitting down: E on a free front seat through its open door (seats.lua)
+local Seats = require("seats")({
+    log = log, valid = valid, passengerOffset = PASSENGER_SIDE_OFFSET,
+    enabled = function() return feature("seats") end,
+    role = function() return ROLE end,
+    playerCar = function() return playerCar() end,
+    localController = function() return localController() end,
+    seated = function()
+        if ROLE == "client" then return clientSeated end
+        local okS, st = pcall(function() local _, carm = managers(); return carm.PlayerCarState end)
+        return okS and st ~= nil and st ~= 0
+    end,
+})
+
 local HIGHLIGHT_PRESS = "/Game/Systems/Managers/BP_HighlightManager.BP_HighlightManager_C:HighlightPress"
+local function onDoorPressed(selfp) pcall(Seats.doorPressed, selfp:get()) end
 local function onHighlightPress(_, pressp, interactedp)
-    if not clientSeated then return end
     local press, interacted = false, true
     pcall(function() press = pressp:get() end)
     pcall(function() interacted = interactedp:get() end)
     if not press or interacted then return end
-    local pawn = localController().Pawn
-    if valid(pawn) then exitWhileRiding(pawn, "Interact while riding") end
+    if ROLE == "client" and clientSeated then
+        local pawn = localController().Pawn
+        if valid(pawn) then exitWhileRiding(pawn, "Interact while riding") end
+        return
+    end
+    pcall(Seats.pressed)
 end
 local function registerEnterCarHook()
     if enterHookDone or ROLE ~= "client" then return end
@@ -1493,28 +1509,7 @@ local function registerEnterCarHook()
                 log("ENTERCAR getting out: UNSEAT sent")
             end)
         end)
-        -- E on a door part: the Highlight's interaction ends in one of three events. Event 1 (the entry) runs only on
-        -- the driver's door; on every other door E is events 0 / 2, which open or shut it (checked with real key
-        -- presses, exp278: E on the passenger door only opened and shut it). For player 2, E on the passenger door
-        -- is its way in, as the driver's door is for the driver: opened here, StartEntry(false) goes straight into
-        -- the entry (StartEntry(true) waits for the front LEFT door's angle and never ends there, exp239); the entry
-        -- shuts the door again. UE4SS runs these callbacks after the event's own body (the toggle is under way).
-        local lastDoorE = -99
-        local function passengerDoorE(selfp)
-            local d = selfp:get()
-            local pd = passengerDoorOf(playerCar())
-            if clientSeated or not valid(pd) or d:GetFullName() ~= pd:GetFullName() then return end
-            if os.clock() - lastDoorE < 1 then return end
-            lastDoorE = os.clock()
-            local okS = pcall(function()
-                d:AttemptOpen()
-                d:StartEntry(false)
-            end)
-            log("ENTERCAR E at the passenger door: its entry started ok=%s", tostring(okS))
-        end
-        for _, ev in ipairs({ DOOR_ENTER_EVENT, DOOR_TOGGLE_EVENTS[1], DOOR_TOGGLE_EVENTS[2] }) do
-            RegisterHook(DOOR_CLASS .. ":" .. ev, passengerDoorE)
-        end
+        -- E on a door only opens / shuts it; sitting down is E on the seat through the open door (seats.lua)
 
         RegisterHook(DOOR_CLASS .. ":PickClosestEntryInterpPoint", function(selfp, locp, compp)
             local pd = passengerDoorOf(playerCar())
@@ -1805,6 +1800,7 @@ local function resetPerMapState(newWorld)
     pcall(CarDoors.reset)
     pcall(Pause.reset)
     pcall(SeatAnim.reset)
+    pcall(Seats.reset)
     pcall(WorldLoot.reset)
     pcall(BodyAnim.reset)
     pcall(Items.reset)
@@ -2213,6 +2209,18 @@ LoopInGameThreadWithDelay(200, function()
             if (ROLE == "host" and fastTick % 5 == 3) or (ROLE == "client" and fastTick % 25 == 3) then
                 okW, errW = pcall(ROLE == "host" and CarDoors.hostTick or CarDoors.clientTick)
                 if not okW then log("cardoors error: %s", tostring(errW)) end
+            end
+            -- seats: the driver's door no longer enters by itself, the "sit down" hint
+            if fastTick % 5 == 4 then
+                okW, errW = pcall(Seats.tick)
+                if not okW then log("seats error: %s", tostring(errW)) end
+                pcall(function() Events.hookFunction(HIGHLIGHT_PRESS, onHighlightPress) end)
+                for i = 0, 2 do
+                    pcall(function()
+                        Events.hookFunction("/Game/Gameplay/Inventory/Items/Car/Doors/BP_CarPart_Door_Base.BP_CarPart_Door_Base_C:BndEvt__Highlight_K2Node_ComponentBoundEvent_"
+                            .. i .. "_OnHighlightInteract__DelegateSignature", onDoorPressed)
+                    end)
+                end
             end
             -- pause: hooks, player 2 gone with its menu open, the paused state again now and then
             if fastTick % 5 == 1 then

@@ -36,7 +36,8 @@ local ROLE, ARG, SCENARIO = readRole()
 -- the host, player 2's E on a door runs on the host), loot (lootable containers hold the host's items).
 local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true,
                    worldrep = true, doors = true, loot = true, bodyanim = true, bodycolor = true, hazards = true,
-                   cardoors = true, cutscene = true, pauseblock = false, pausefix = true, pause = true }
+                   cardoors = true, cutscene = true, pauseblock = false, pausefix = true, pause = true,
+                   seatanim = true }
 do
     local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
     if f then
@@ -725,6 +726,16 @@ local Pause = require("pause")({
     hostMsgHandlers = hostMsgHandlers,
 })
 
+-- player 2 getting in / out of the car moves smoothly on the host (seatanim.lua)
+local passengerDoorOf, nearestEntryPoint      -- defined below, with player 2's door hooks
+local SeatAnim = require("seatanim")({
+    log = log, valid = valid, objName = objName, fmtLoc = fmtLoc, standOnFeet = standOnFeet,
+    enabled = function() return feature("seatanim") end,
+    isSeated = function(key) return seated[key] ~= nil end,
+    passengerDoorOf = function(car) return passengerDoorOf(car) end,
+    nearestEntryPoint = function(door, from) return nearestEntryPoint(door, from) end,
+})
+
 -- the host's world items, local copies on the other players' machines (items.lua)
 local Items = require("items")({
     log = log, valid = valid, same = Events.same, UEHelpers = UEHelpers, ItemState = ItemState,
@@ -739,6 +750,7 @@ local function seatPassenger(pc, car, force)
     local ch = pc.Pawn
     if not valid(ch) or className(ch) ~= CHARACTER_CLASS then return end
     if seated[ch:GetFullName()] and not force then return end
+    local glided = SeatAnim.seated(ch)
     pcall(function() ch:K2_DetachFromActor(EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld) end)
     local seat = car:K2_GetActorLocation()
     pcall(function() seat = car.TempSocket_Seat:K2_GetComponentLocation() end)
@@ -747,6 +759,7 @@ local function seatPassenger(pc, car, force)
     pcall(function() ch.CharacterMovement:DisableMovement() end)
     ch:SetActorEnableCollision(false)
     ch:K2_SetActorLocation(target, false, {}, true)
+    if glided then pcall(function() ch:K2_SetActorRotation({ Pitch = 0, Yaw = car:K2_GetActorRotation().Yaw, Roll = 0 }, true) end) end
     ch:K2_AttachToActor(car, UEHelpers.FindOrAddFName("None"), EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld,
         EAttachmentRule.KeepWorld, false)
     seated[ch:GetFullName()] = car:GetFullName()
@@ -801,13 +814,15 @@ local function unseatPassenger(pc, car)
         log("UNSEAT %s asked to get out, not allowed now (cutscene): stays", objName(ch))
         return
     end
+    local seatAt = ch:K2_GetActorLocation()
     ch:K2_DetachFromActor(EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld, EAttachmentRule.KeepWorld)
     standOnFeet(ch)
-    placeOutsidePassengerDoor(ch, car)
+    local spot = placeOutsidePassengerDoor(ch, car)
+    local t = { X = spot.X, Y = spot.Y, Z = spot.Z }
+    pcall(SeatAnim.getOut, ch, car, seatAt, t)
     -- player 2 moves its own character there too: it stayed inside the car on its own machine (exp174, playtest:
     -- "hard to get out of the car")
     pcall(function()
-        local t = ch:K2_GetActorLocation()
         hostSend(string.format("PLACE|%d|%.0f,%.0f,%.0f", pc.PlayerState.PlayerId, t.X, t.Y, t.Z))
     end)
     seated[ch:GetFullName()] = nil
@@ -820,6 +835,15 @@ Chan.setCommandHandler(function(pc, cmd, seq)
     log("CMD received #%d %s from %s", seq, cmd:sub(1, 120), objName(pc))
     local car = playerCar()
     if valid(car) and kind == "SEAT" then seatPassenger(pc, car)
+    elseif valid(car) and kind == "ENTERING" then
+        local ch = pc.Pawn
+        if valid(ch) and className(ch) == CHARACTER_CLASS and not seated[ch:GetFullName()] then
+            local seat = car:K2_GetActorLocation()
+            pcall(function() seat = car.TempSocket_Seat:K2_GetComponentLocation() end)
+            local right = car:GetActorRightVector()
+            pcall(SeatAnim.getIn, ch, car, { X = seat.X + right.X * PASSENGER_SIDE_OFFSET,
+                Y = seat.Y + right.Y * PASSENGER_SIDE_OFFSET, Z = seat.Z + 10 })
+        end
     elseif valid(car) and kind == "UNSEAT" then unseatPassenger(pc, car)
     elseif kind == "PICKUP" or kind == "DROP" then Items.hostCommand(kind, args, pc)
     elseif kind == "PINGBACK" then Chan.hostPingBack(args)
@@ -886,7 +910,7 @@ end
 local freeSpot = {}          -- character full name -> its last location while not attached
 local function undoUnwantedSeats()
     for _, ch in ipairs(FindAllOf(CHARACTER_CLASS) or {}) do
-        if valid(ch) and not isMyCharacter(ch) then
+        if valid(ch) and not isMyCharacter(ch) and not SeatAnim.busy(ch) then
             local key = ch:GetFullName()
             local okP, par = pcall(function() return ch:GetAttachParentActor() end)
             local attached = okP and valid(par)
@@ -1361,7 +1385,7 @@ end
 local DOOR_CLASS = "/Game/Gameplay/Inventory/Items/Car/Doors/BP_CarPart_Door_Base.BP_CarPart_Door_Base_C"
 local PLAYER_CAR_CLASS = "/Game/Characters/PlayerCar/BP_PlayerCarNew.BP_PlayerCarNew_C"
 local DOOR_ENTER_EVENT = "BndEvt__Highlight_K2Node_ComponentBoundEvent_1_OnHighlightInteract__DelegateSignature"
-local function passengerDoorOf(car)
+function passengerDoorOf(car)
     if not valid(car) then return nil end
     local carName = car:GetFullName()
     local c, f, r = car:K2_GetActorLocation(), car:GetActorForwardVector(), car:GetActorRightVector()
@@ -1375,7 +1399,7 @@ local function passengerDoorOf(car)
     end
     return nil
 end
-local function nearestEntryPoint(door, from)
+function nearestEntryPoint(door, from)
     local best, bestD = nil, math.huge
     local arrow = StaticFindObject("/Script/Engine.ArrowComponent")
     for _, c in ipairs(door:K2_GetComponentsByClass(arrow) or {}) do
@@ -1418,6 +1442,7 @@ local function registerEnterCarHook()
             -- the entry (2 s) plays here; seated by the host once it is done (the replicated seat arriving earlier
             -- would pull player 2 onto the seat in the middle of it)
             log("ENTERCAR getting in through the passenger door")
+            sendCommand("ENTERING")
             ExecuteInGameThreadWithDelay(2100, function() sendCommand("SEAT") end)
         end)
         RegisterHook(cls .. ":Exit Car", function(ctx)
@@ -1708,6 +1733,7 @@ local function resetPerMapState(newWorld)
     pcall(WorldDoors.reset)
     pcall(CarDoors.reset)
     pcall(Pause.reset)
+    pcall(SeatAnim.reset)
     pcall(WorldLoot.reset)
     pcall(BodyAnim.reset)
     pcall(Items.reset)

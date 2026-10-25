@@ -19,6 +19,7 @@ return function(ctx)
     local lastAt = {}           -- host: door -> os.clock() of its last event (still swinging: not checked)
     local asked = false         -- player 2: asked for the host's doors on this map
     local localAt = {}          -- player 2: door -> os.clock() of its own last event there
+    local swing = {}            -- door -> { to = "o" / "s", at = os.clock() }: the last event played on this machine
     local ticks = 0
 
     -- the car's door parts by where they sit on it (exp187, wagon: front doors 131 uu ahead of the car's origin,
@@ -62,6 +63,7 @@ return function(ctx)
             if what == "o" then d:AttemptOpen() else d:AttemptShut() end
         end)
         applying = false
+        if ok then swing[name] = { to = what, at = os.clock() } end
         if not ok then log("CARDOOR %s %s failed: %s", name, what, tostring(err)) end
         return ok
     end
@@ -82,6 +84,7 @@ return function(ctx)
                         ctx.sendCommand("CD," .. name .. what)
                         localAt[name] = os.clock()
                     end
+                    swing[name] = { to = what, at = os.clock() }
                     log("CARDOOR %s %s here: sent", name, what == "o" and "opens" or "shuts")
                     return
                 end
@@ -127,8 +130,15 @@ return function(ctx)
         -- the host passes player 2's own events back: an older one arriving after player 2's next one re-opened a
         -- door player 2 had just shut (exp191: E to get in opens and shuts the door within a second)
         if os.clock() - (localAt[name] or -99) < 2 then return end
-        local okO, open = pcall(isOpen, d)
-        if okO and open == (what == "o") then return end
+        -- a door still swinging is where its last event sends it: a door that has only just started to open is
+        -- under 15 degrees and looked shut, so the host's "shut" right after was dropped (review of 2026-10-24)
+        local sw = swing[name]
+        if sw and os.clock() - sw.at < 3 then
+            if sw.to == what then return end
+        else
+            local okO, open = pcall(isOpen, d)
+            if okO and open == (what == "o") then return end
+        end
         if play(name, what) then log("CARDOOR %s %s by the host: played", name, what) end
     end
 
@@ -156,6 +166,6 @@ return function(ctx)
             ctx.sendCommand("CD,?")
         end
     end
-    function M.reset() lastSent, lastAt, localAt, asked, hooked = {}, {}, {}, false, false end
+    function M.reset() lastSent, lastAt, localAt, swing, asked, hooked = {}, {}, {}, {}, false, false end
     return M
 end

@@ -112,6 +112,9 @@ return function(ctx)
         if partnerWants and not ctx.clientsPresent() then
             log("PAUSE player 2 left with its pause menu open")
             setPartner(false)
+        elseif (reasons()[PARTNER:lower()] == true) ~= partnerWants and valid(uiManager()) then
+            -- the game's reason disagrees with player 2's last word (no manager at that moment): set it again
+            setPartner(partnerWants)
         end
         -- while paused, now and then again (a player who joined, a lost message)
         if sentState and sentState:sub(1, 7) == "PAUSE|1" and os.time() >= resendAt then

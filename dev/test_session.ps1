@@ -17,9 +17,16 @@ Dev "client2" $E | Out-Null
 $r = WaitFor "client2" "lua return name(me():GetAttachParentActor()), fmt(pc():IsLookInputIgnored())" "BP_PlayerCar\w+\s+false" 15
 $checks["E at the car seats player 2 as passenger, camera free ($r)"] = $r -match "BP_PlayerCar\w+\s+false"
 Start-Sleep 3
+# the host watches player 2's visible body getting out: it moves from the seat to the door, no jump, the car stays
+$watch = "lua local car for _, c in ipairs(FindAllOf('BP_PlayerCarNew_C')) do if c:IsValid() then car = c end end local p2 for _, ch in ipairs(FindAllOf('PDP_MainCharacter_C')) do if ch:IsValid() and ch.Controller:IsValid() and not ch.Controller:IsLocalController() then p2 = ch end end local c0, last, mx, t0 = car:K2_GetActorLocation(), nil, 0, os.clock() if SWL then CancelDelayedAction(SWL) end SWL = LoopInGameThreadWithDelay(16, function() if os.clock() - t0 > 8 then return end local l, c = p2.Mesh:K2_GetComponentLocation(), car:K2_GetActorLocation() local p = { l.X - c.X, l.Y - c.Y, l.Z - c.Z } if last then mx = math.max(mx, math.sqrt((p[1]-last[1])^2 + (p[2]-last[2])^2 + (p[3]-last[3])^2)) end last = p end) SWR = function() local c = car:K2_GetActorLocation() return string.format('maxStep=%.0f carMoved=%.0f', mx, math.sqrt((c.X-c0.X)^2 + (c.Y-c0.Y)^2)) end return 'watching'"
+Dev "client1" $watch | Out-Null
 Dev "client2" $E | Out-Null
 $r = WaitFor "client2" "lua return name(me():GetAttachParentActor())" "^nil" 15
 $checks["E while riding gets player 2 out ($r)"] = $r -match "^nil"
+Start-Sleep 4
+$sw = Dev "client1" "lua return SWR()"
+$m = [regex]::Match($sw, "maxStep=(\d+) carMoved=(\d+)")
+$checks["the host sees player 2 get out smoothly, the car stays ($sw; before the fix one jump of ~146 uu)"] = $m.Success -and ([int]$m.Groups[1].Value -lt 80) -and ([int]$m.Groups[2].Value -lt 5)
 # the host's PLACE (where player 2 stands outside) arrives a moment after the detach: measure from there, or the
 # teleport itself counted as walking (exp184 passed while player 2 could not walk, exp191)
 Start-Sleep 3

@@ -18,6 +18,7 @@ Do not install `PDCoopDev` for normal play: it has cheats and runs Lua sent thro
 | `test_loot.ps1` | lootable containers: player 2 gets the host's items, takes and puts reach the other side |
 | `zone_pair.ps1` | host loads a save slot, drives the route into a real generated zone, re-hosts it, player 2 joins; leaves both running |
 | `snapdiff.ps1` | compares two `snapshot` files class by class: counts, actors without a twin on the other side |
+| `sendkey.ps1` | presses a real key in a test copy's game window (brings it to the front): `-Client client2 -Key E` (Escape, Tab, Space, Enter by name) |
 | `run_all.ps1` | every test one after the other, one summary line each |
 | `testlib.ps1` | helpers shared by the tests |
 

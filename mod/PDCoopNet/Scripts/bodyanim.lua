@@ -5,6 +5,11 @@
 -- The game ships the Advanced Locomotion System v3 animations for its mannequin (ALS_Mannequin_Skeleton, the same
 -- skeleton as the player character's mesh). The body's mesh is switched to single-animation mode and the clip
 -- follows the character's replicated state: velocity, bIsCrouched, falling, attached to a car, down (downed.lua).
+-- Walking, running, crouching and jumping (switch alsloco, on): the mesh keeps its own animation blueprint
+-- instead, the game's ALS Mannequin_AnimBP, which still reads the character's ALS variables (velocity, direction,
+-- stance; computed for the other player's character too, exp276: host sees player 2 walk at 170-375, player 2 the
+-- host at 375, crouch reaches its ALS_Stance) and blends between its states and directions itself. Single clips
+-- jumped from one to the next (owner's playtest: "walk F -> walk R snaps"). Lying and sitting stay clips.
 -- There is no sitting clip in the game. Sitting: a PoseableMeshComponent added to the character copies the idle
 -- pose of the body every tick with the legs bent (thigh -90, calf +90 about the mesh's X axis, component space;
 -- exp157), and is shown instead of the body; main.lua lowers both into the seat.
@@ -216,9 +221,20 @@ return function(ctx)
             pcall(muteWwise, ch)
             local key = ch:GetFullName()
             local name, rate = pick(ch)
-            local a = clip(name)
             local s = state[key]
             local mesh = ch.Mesh
+            if ctx.alsLoco() and name ~= "lying" and name ~= "sit" then
+                -- locomotion by the mesh's own ALS animation blueprint
+                if mesh and (not s or s.clip ~= "als") then
+                    local ok, err = pcall(function() mesh:SetAnimationMode(0) end)   -- EAnimationMode::AnimationBlueprint
+                    local n = (s and s.changes or 0) + 1
+                    if n <= 40 or not ok then log("BODYANIM %s: ALS locomotion ok=%s %s", ch:GetFName():ToString(), tostring(ok), ok and "" or tostring(err)) end
+                    state[key] = { clip = "als", rate = 1, changes = n }
+                    pcall(sitPose, ch, false)
+                end
+                name = nil
+            end
+            local a = name and clip(name)
             if a and mesh then
                 if not s or s.clip ~= name then
                     local ok, err = pcall(function()

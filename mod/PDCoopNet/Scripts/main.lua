@@ -37,7 +37,7 @@ local ROLE, ARG, SCENARIO = readRole()
 local FEATURES = { itemstate = true, trunk = true, carstate = true, refuel = true, invsave = true, downed = true,
                    worldrep = true, doors = true, loot = true, bodyanim = true, bodycolor = true, hazards = true,
                    cardoors = true, cutscene = true, pauseblock = false, pausefix = true, pause = true,
-                   seatanim = true }
+                   seatanim = true, alsloco = true }
 do
     local f = io.open("ue4ss/Mods/PDCoopNet/features.txt", "r")
     if f then
@@ -562,6 +562,7 @@ end
 
 -- ---------------------------------------------------------------- channel (channel.lua)
 local fastTick = 0           -- 200 ms ticks of the main loop
+local fastDedupeUntil = 0    -- player 2: os.clock() until which its local car copies are looked for every 200 ms
 local Chan = require("channel")({
     log = log, valid = valid, objName = objName, UEHelpers = UEHelpers, role = ROLE,
     localController = function() return localController() end,
@@ -634,6 +635,7 @@ local Downed = require("downed")({
 -- the other player's body animation: walk, run, crouch, jump, lying when down, sitting (bodyanim.lua)
 local BodyAnim = require("bodyanim")({
     log = log, valid = valid, UEHelpers = UEHelpers, isCar = isCar, Events = Events,
+    alsLoco = function() return feature("alsloco") end,
     isDown = function(ch) return feature("downed") and Downed.isDown(ch) end,
 })
 bodySitting = function(ch) return BodyAnim.isSitting(ch) end
@@ -1385,6 +1387,8 @@ end
 local DOOR_CLASS = "/Game/Gameplay/Inventory/Items/Car/Doors/BP_CarPart_Door_Base.BP_CarPart_Door_Base_C"
 local PLAYER_CAR_CLASS = "/Game/Characters/PlayerCar/BP_PlayerCarNew.BP_PlayerCarNew_C"
 local DOOR_ENTER_EVENT = "BndEvt__Highlight_K2Node_ComponentBoundEvent_1_OnHighlightInteract__DelegateSignature"
+local DOOR_TOGGLE_EVENTS = { "BndEvt__Highlight_K2Node_ComponentBoundEvent_0_OnHighlightInteract__DelegateSignature",
+    "BndEvt__Highlight_K2Node_ComponentBoundEvent_2_OnHighlightInteract__DelegateSignature" }
 function passengerDoorOf(car)
     if not valid(car) then return nil end
     local carName = car:GetFullName()
@@ -1414,6 +1418,35 @@ function nearestEntryPoint(door, from)
 end
 local enterHookDone = false
 local pendingUnseatAt = nil   -- player 2: os.clock() of an Exit Car whose UNSEAT is about to be sent
+-- player 2 riding gets out: the game's own exit, through the passenger door (LocateSafeExitPoint hook below)
+local function exitWhileRiding(ch, why)
+    if not (hostAllowsExit and exitAllowedHere()) then
+        log("ENTERCAR %s: getting out is not allowed now (cutscene)", why)
+        return
+    end
+    ExecuteInGameThreadWithDelay(100, function()
+        if not valid(ch) or not clientSeated then return end
+        for _, tl in ipairs({ "EnterCarTimeline", "EnterCarDipToBlack" }) do
+            pcall(function() ch[tl]:Stop() end)
+        end
+        local okX = pcall(function() callBPFunction(ch, "Exit Car", false, false) end)
+        log("ENTERCAR %s: getting out through the passenger door (ok=%s)", why, tostring(okX))
+    end)
+end
+-- E (the Interact input, whatever key it is on) while riding: from the passenger seat it highlights nothing, so
+-- the game did nothing and player 2 could not get out (real key presses, exp279). An Interact press that
+-- interacted with nothing gets player 2 out; one that used something in the car does not. Hooked again after a
+-- map change (Events.hookFunction from the client loop).
+local HIGHLIGHT_PRESS = "/Game/Systems/Managers/BP_HighlightManager.BP_HighlightManager_C:HighlightPress"
+local function onHighlightPress(_, pressp, interactedp)
+    if not clientSeated then return end
+    local press, interacted = false, true
+    pcall(function() press = pressp:get() end)
+    pcall(function() interacted = interactedp:get() end)
+    if not press or interacted then return end
+    local pawn = localController().Pawn
+    if valid(pawn) then exitWhileRiding(pawn, "Interact while riding") end
+end
 local function registerEnterCarHook()
     if enterHookDone or ROLE ~= "client" then return end
     local any = FindFirstOf(CHARACTER_CLASS)
@@ -1437,18 +1470,7 @@ local function registerEnterCarHook()
                     return
                 end
                 -- E while riding: the game starts another entry; out through the passenger door instead
-                if not (hostAllowsExit and exitAllowedHere()) then
-                    log("ENTERCAR E while riding: getting out is not allowed now (cutscene)")
-                    return
-                end
-                ExecuteInGameThreadWithDelay(100, function()
-                    if not valid(ch) then return end
-                    for _, tl in ipairs({ "EnterCarTimeline", "EnterCarDipToBlack" }) do
-                        pcall(function() ch[tl]:Stop() end)
-                    end
-                    local okX = pcall(function() callBPFunction(ch, "Exit Car", false, false) end)
-                    log("ENTERCAR E while riding: getting out through the passenger door (ok=%s)", tostring(okX))
-                end)
+                exitWhileRiding(ch, "E while riding")
                 return
             end
             -- the entry (2 s) plays here; seated by the host once it is done (the replicated seat arriving earlier
@@ -1471,19 +1493,29 @@ local function registerEnterCarHook()
                 log("ENTERCAR getting out: UNSEAT sent")
             end)
         end)
-        RegisterHook(DOOR_CLASS .. ":" .. DOOR_ENTER_EVENT, function(selfp)
+        -- E on a door part: the Highlight's interaction ends in one of three events. Event 1 (the entry) runs only on
+        -- the driver's door; on every other door E is events 0 / 2, which open or shut it (checked with real key
+        -- presses, exp278: E on the passenger door only opened and shut it). For player 2, E on the passenger door
+        -- is its way in, as the driver's door is for the driver: opened here, StartEntry(false) goes straight into
+        -- the entry (StartEntry(true) waits for the front LEFT door's angle and never ends there, exp239); the entry
+        -- shuts the door again. UE4SS runs these callbacks after the event's own body (the toggle is under way).
+        local lastDoorE = -99
+        local function passengerDoorE(selfp)
             local d = selfp:get()
             local pd = passengerDoorOf(playerCar())
             if clientSeated or not valid(pd) or d:GetFullName() ~= pd:GetFullName() then return end
-            -- StartEntry(true) (door shut) opens the door and waits for the front LEFT door's angle: never ends on
-            -- the passenger door (exp239). Opened here, StartEntry(false) goes straight into the entry; the entry
-            -- shuts the door again.
+            if os.clock() - lastDoorE < 1 then return end
+            lastDoorE = os.clock()
             local okS = pcall(function()
                 d:AttemptOpen()
                 d:StartEntry(false)
             end)
             log("ENTERCAR E at the passenger door: its entry started ok=%s", tostring(okS))
-        end)
+        end
+        for _, ev in ipairs({ DOOR_ENTER_EVENT, DOOR_TOGGLE_EVENTS[1], DOOR_TOGGLE_EVENTS[2] }) do
+            RegisterHook(DOOR_CLASS .. ":" .. ev, passengerDoorE)
+        end
+
         RegisterHook(DOOR_CLASS .. ":PickClosestEntryInterpPoint", function(selfp, locp, compp)
             local pd = passengerDoorOf(playerCar())
             local me = localController().Pawn
@@ -1766,6 +1798,7 @@ local function resetPerMapState(newWorld)
     carSmooth, carFollowFor = nil, ""
     gmLogged = false
     mapTicks = 0
+    fastDedupeUntil = os.clock() + 30
     pcall(Downed.mapChanged, newWorld)
     pcall(WorldRep.reset)
     pcall(WorldDoors.reset)
@@ -2135,11 +2168,17 @@ LoopInGameThreadWithDelay(200, function()
             okB, errB = pcall(placeTick)
             if not okB then log("place error: %s", tostring(errB)) end
             -- player 2's own copy of a car the host replicates goes at once: the new-game opening seats player 2 at
-            -- the wheel of its own intro car until then (owner: "what is with the display on the client")
-            okB, errB = pcall(dedupeCar)
-            if not okB then log("dedupe error: %s", tostring(errB)) end
-            okB, errB = pcall(passengerViewTick)
-            if not okB then log("view error: %s", tostring(errB)) end
+            -- the wheel of its own intro car until then (owner: "what is with the display on the client").
+            -- Every 200 ms only in the first 30 s of a map, then every second: FindAllOf walks every object, and in a
+            -- zone that every 200 ms slowed player 2's game to a crawl (exp282: 5 s ticks 10-22 s apart)
+            if os.clock() < fastDedupeUntil or fastTick % 5 == 0 then
+                okB, errB = pcall(dedupeCar)
+                if not okB then log("dedupe error: %s", tostring(errB)) end
+            end
+            if fastTick % 5 == 0 then
+                okB, errB = pcall(passengerViewTick)
+                if not okB then log("view error: %s", tostring(errB)) end
+            end
             okB, errB = pcall(ensureCarFollow)
             if not okB then log("carfollow error: %s", tostring(errB)) end
         end
@@ -2289,6 +2328,7 @@ LoopInGameThreadWithDelay(5000, function()
             if SCENARIO == "loot" then step("loottest", clientLootTestTick) end
             step("seathook", registerSeatHook)
             step("enterhook", registerEnterCarHook)
+            step("interacthook", function() Events.hookFunction(HIGHLIGHT_PRESS, onHighlightPress) end)
             local bound = false
             step("bind", function() bound = bindClientCharacter() end)
             if tick >= 30 then step("report", reportLocalReplicatedActorsOnce) end
